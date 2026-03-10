@@ -1,0 +1,36 @@
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Flutter / Dart
+client/.dart_tool/
+client/.flutter-plugins
+client/.flutter-plugins-dependencies
+client/.pub-cache/
+client/.pub/
+client/build/
+client/flutter_export_environment.sh
+client/**/*.log
+
+# Secrets (CRITICAL)
+client/.env
+server/.env
+*.key
+*.pem
+*.p8
+*.keystore
+*.jks
+client/android/key.properties
+
+# Go / Server
+server/relay
+server/relay.exe
+server/bin/
+server/tmp/
+
+# Crash Logs
+*.crash
+*.log

@@ -1,0 +1,77 @@
+name: ghost_client
+description: Military-grade end-to-end encrypted messaging app — no phone, no email, no traces.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # ── Cryptography & Signal Protocol ─────────────────────────────────────────
+  libsignal_protocol_dart: ^0.4.0       # Signal Double Ratchet + X3DH
+  cryptography: ^2.7.0                  # AES-256-GCM, HKDF, PBKDF2
+  pointycastle: ^3.9.1                  # Low-level crypto primitives
+  convert: ^3.1.1                       # Base64 / hex encoding
+
+  # ── Secure Storage (Android Keystore / iOS Secure Enclave) ─────────────────
+  flutter_secure_storage: ^9.2.2
+
+  # ── Local Encrypted Database ─────────────────────────────────────────────── 
+  sqflite_sqlcipher: ^2.2.0            # SQLCipher AES-256 encrypted SQLite
+
+  # ── Networking ──────────────────────────────────────────────────────────────
+  web_socket_channel: ^3.0.1
+  http: ^1.2.2
+
+  # ── QR Code ─────────────────────────────────────────────────────────────────
+  qr_flutter: ^4.1.0
+  mobile_scanner: ^5.2.3               # MLKit / AVFoundation QR scanning
+
+  # ── Supabase ─────────────────────────────────────────────────────────────────
+  supabase_flutter: ^2.7.0
+
+  # ── UI & UX ──────────────────────────────────────────────────────────────────
+  flutter_animate: ^4.3.0
+  google_fonts: ^6.2.1
+  phosphor_flutter: ^2.1.0
+  gap: ^3.0.1
+  intl: ^0.19.0
+
+  # ── Device Security ──────────────────────────────────────────────────────────
+  flutter_windowmanager: ^0.2.0        # FLAG_SECURE — block screenshots (Android)
+  local_auth: ^2.3.0                   # Biometric lock (Android / iOS)
+
+  # ── State Management ─────────────────────────────────────────────────────────
+  flutter_bloc: ^8.1.6
+  equatable: ^2.0.5
+
+  # ── Media ────────────────────────────────────────────────────────────────────
+  image_picker: ^1.1.2
+  flutter_image_compress: ^2.1.0
+  video_player: ^2.9.2
+
+  # ── Utils ────────────────────────────────────────────────────────────────────
+  uuid: ^4.5.1
+  collection: ^1.18.0
+  share_plus: ^9.0.0
+  path_provider: ^2.1.5
+  path: ^1.9.0
+  flutter_dotenv: ^5.1.0               # Environment variables
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  mockito: ^5.4.5
+  integration_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/fonts/
+    - assets/images/
+    - .env

@@ -1,0 +1,30 @@
+services:
+  # ── Ghost Relay Server ────────────────────────────────────────────────────
+  - type: web
+    name: ghost-relay
+    runtime: docker
+    dockerfilePath: ./server/Dockerfile
+    dockerContext:  ./server
+    region: oregon   # choose closest to users
+    plan: starter
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: ghost-redis
+          property: connectionString
+      - key: SUPABASE_URL
+        sync: false   # set in Render dashboard
+      - key: SUPABASE_ANON_KEY
+        sync: false   # set in Render dashboard
+    healthCheckPath: /health
+    autoDeploy: true
+
+  # ── Redis (ephemeral — no persistence) ───────────────────────────────────
+  - type: redis
+    name: ghost-redis
+    plan: starter
+    maxmemoryPolicy: allkeys-lru
+    # appendonly: no  (set in redis config; no disk persistence for max security)
