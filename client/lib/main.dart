@@ -13,6 +13,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'core/identity/identity_service.dart';
 import 'core/storage/secure_db.dart';
 import 'core/storage/ephemeral_cache.dart';
+import 'core/push/push_service.dart';
 import 'features/onboarding/onboarding_screen.dart';
 import 'features/contacts/contacts_screen.dart';
 import 'app_config.dart';
@@ -25,6 +26,9 @@ void main() async {
   if (Platform.isAndroid) {
     await FlutterWindowManager.addFlags(FlutterWindowManager.FLAG_SECURE);
   }
+
+  // ── Initialize Push Notifications (Silent Wake-ups) ────────────────────
+  await PushService().initialize();
 
   // ── Force portrait orientation ────────────────────────────────────────────
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);

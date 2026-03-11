@@ -11,8 +11,9 @@ dependencies:
     sdk: flutter
 
   # ── Cryptography & Signal Protocol ─────────────────────────────────────────
-  libsignal_protocol_dart: ^0.4.0       # Signal Double Ratchet + X3DH
+  libsignal_protocol_dart: ^0.4.1-nullsafety.0  # Signal Double Ratchet + X3DH
   cryptography: ^2.7.0                  # AES-256-GCM, HKDF, PBKDF2
+  crypto: ^3.0.3                        # SHA-256, SHA-512, HMAC
   pointycastle: ^3.9.1                  # Low-level crypto primitives
   convert: ^3.1.1                       # Base64 / hex encoding
 

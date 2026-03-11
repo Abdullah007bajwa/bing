@@ -4,6 +4,7 @@
 // Schema: messages, contacts, group_keys, session_states
 
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';

@@ -5,7 +5,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:convert/convert.dart';
-import 'package:cryptography/cryptography.dart';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 import 'package:http/http.dart' as http;
@@ -36,12 +36,21 @@ class IdentityService {
 
   // ── First Launch: Generate identity keypair ──────────────────────────────
   Future<IdentityKeyPair> generateIdentityKeyPair() async {
-    final keyPair = generateIdentityKeyPairUnchecked();
+    final keyPair = generateIdentityKeyPair_();
     await _persistKeyPair(keyPair);
     _cachedKeyPair = keyPair;
     _cachedUserId = _deriveUserId(keyPair.getPublicKey());
     await _secureStorage.write(key: _kUserIdStorageKey, value: _cachedUserId);
     return keyPair;
+  }
+
+  // Helper to generate a new identity key pair
+  IdentityKeyPair generateIdentityKeyPair_() {
+    final keyPair = Curve.generateKeyPair();
+    return IdentityKeyPair(
+      IdentityKey(keyPair.publicKey),
+      keyPair.privateKey,
+    );
   }
 
   // ── Load existing keypair from secure storage ────────────────────────────
@@ -63,7 +72,7 @@ class IdentityService {
   // ── Derive user_id = base58(SHA-256(public_key_bytes)) ──────────────────
   String _deriveUserId(IdentityKey publicKey) {
     final pubKeyBytes = publicKey.publicKey.serialize();
-    final digest = Sha256().hashSync(pubKeyBytes);
+    final digest = crypto.sha256.convert(pubKeyBytes);
     return _base58Encode(Uint8List.fromList(digest.bytes));
   }
 
@@ -88,10 +97,10 @@ class IdentityService {
     final myBytes     = kp.getPublicKey().publicKey.serialize();
     final remoteBytes = base64Decode(remotePublicKeyB64);
     final combined    = Uint8List.fromList([...myBytes, ...remoteBytes]);
-    final digest      = Sha256().hashSync(combined);
-    final hex         = hex_encode(digest.bytes);
+    final digest      = crypto.sha256.convert(combined);
+    final hexString   = hex.encode(digest.bytes);
     // Format as 12 groups of 5 digits
-    return List.generate(12, (i) => hex.substring(i * 5, i * 5 + 5))
+    return List.generate(12, (i) => hexString.substring(i * 5, i * 5 + 5))
         .join(' ');
   }
 
@@ -155,6 +164,4 @@ class IdentityService {
     }
     return result;
   }
-
-  static String hex_encode(List<int> bytes) => hex.encode(bytes);
 }

@@ -11,7 +11,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../core/identity/identity_service.dart';
 import '../../app_config.dart';
-import 'panic_setup_screen.dart';
+import '../settings/panic_setup_screen.dart';
 
 class OnboardingScreen extends StatefulWidget {
   const OnboardingScreen({super.key});
@@ -33,7 +33,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   }
 
   Future<void> _initialize() async {
-    final kp = await _identity.generateIdentityKeyPair();
+    await _identity.generateIdentityKeyPair();
     final uid = await _identity.getUserId();
     final pk  = await _identity.getPublicKeyBase64();
 
@@ -122,7 +122,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
             decoration: BoxDecoration(
               color:        const Color(0xFF111318),
               borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: cs.primary.withOpacity(0.3), width: 1),
+              border: Border.all(color: cs.primary.withValues(alpha: 0.3), width: 1),
             ),
             child: Column(
               children: [
@@ -220,7 +220,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color:        Colors.white.withOpacity(0.04),
+        color:        Colors.white.withValues(alpha: 0.04),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Row(
@@ -264,7 +264,7 @@ class _GhostLogo extends StatelessWidget {
             ),
             boxShadow: [
               BoxShadow(
-                color:  const Color(0xFF00E5B0).withOpacity(0.4),
+                color:  const Color(0xFF00E5B0).withValues(alpha: 0.4),
                 blurRadius: 24,
                 spreadRadius: 4,
               ),

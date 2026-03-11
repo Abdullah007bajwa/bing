@@ -95,12 +95,21 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollToBottom();
   }
 
-  // ── Incoming encrypted packet ─────────────────────────────────────────────
+  // ── Incoming encrypted packet (Sealed Sender Model) ──────────────────
   Future<void> _onIncomingPacket(Map<String, dynamic> packet) async {
-    if (packet['from'] != widget.contact.userId) return;
     if (_cipher == null) return;
 
     try {
+      // 🚨 SEALED SENDER ARCHITECTURE 🚨
+      // The Go relay server no longer attaches the 'from' metadata field.
+      // 
+      // How do we know who sent this message?
+      // Plausible deniability via trial decryption.
+      // We attempt to decrypt the raw payload using the current active Contact's session.
+      // If the Signal protocol HMAC fails, it throws InvalidMessageException,
+      // silently discarding it (meaning it was meant for another contact session).
+      // If it decrypts cleanly, the cryptographic proof guarantees it came from THIS contact.
+      
       final plaintext = await _signal.decryptMessage(cipher: _cipher!, packet: packet);
       final now       = DateTime.now().millisecondsSinceEpoch;
       final msg       = GhostMessage(

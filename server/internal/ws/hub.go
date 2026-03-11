@@ -79,7 +79,6 @@ func (h *Hub) Run(ctx context.Context) {
 // route either delivers to an online client or stores in Redis for TTL.
 func (h *Hub) route(env model.Envelope) {
 	delivery := model.Delivery{
-		From:       env.From,
 		Ciphertext: env.Packet.Ciphertext,
 		MsgType:    env.Packet.MsgType,
 		TTL:        env.Packet.TTL,
@@ -179,8 +178,8 @@ func (h *Hub) HandleClient(c *Client) {
 			continue // malformed — discard
 		}
 
-		// Basic validation: must have a recipient and ciphertext
-		if pkt.To == "" || pkt.Ciphertext == "" {
+		// Basic validation: must have a recipient, ciphertext, and UID nonce
+		if pkt.To == "" || pkt.Ciphertext == "" || pkt.ID == "" {
 			continue
 		}
 		// Never relay to self
@@ -188,6 +187,31 @@ func (h *Hub) HandleClient(c *Client) {
 			continue
 		}
 
-		h.relay <- model.Envelope{From: c.ID, Packet: pkt}
+		// ── Relay Hardening (Phase 4) ───────────────────────────────────────
+
+		ctx := context.Background()
+
+		// 1. Rate Limiting (100 packets capacity, regenerates 100 per minute)
+		allowed, err := h.store.AllowRateLimit(ctx, c.ID, 100, 100)
+		if err != nil || !allowed {
+			log.Warn().Str("user", c.ID[:8]).Msg("rate limit exceeded, dropping packet")
+			continue
+		}
+
+		// 2. Replay Protection (track nonce for up to 24h)
+		ttl := time.Duration(pkt.TTL) * time.Second
+		if ttl <= 0 || ttl > 24*time.Hour {
+			ttl = 24 * time.Hour
+		}
+		
+		isNew, err := h.store.CheckReplay(ctx, pkt.ID, ttl)
+		if err != nil || !isNew {
+			log.Warn().Str("user", c.ID[:8]).Str("pkt", pkt.ID).Msg("replay detected, dropping packet")
+			continue
+		}
+
+		// ────────────────────────────────────────────────────────────────────
+
+		h.relay <- model.Envelope{Packet: pkt}
 	}
 }

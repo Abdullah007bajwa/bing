@@ -66,6 +66,7 @@ class GhostMessage {
   );
 
   Map<String, dynamic> toRelayPacket(String toUserId) => {
+    'id':          id, // Nonce for relay server replay protection
     'to':          toUserId,
     'ciphertext':  ciphertext,
     'ttl_seconds': ttlSeconds,

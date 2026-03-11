@@ -5,7 +5,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
-import '../storage/secure_db.dart';
 
 class SignalSessionService {
   static final SignalSessionService _instance = SignalSessionService._();
@@ -67,7 +66,7 @@ class SignalSessionService {
     final type            = packet['type'] as int;
 
     Uint8List plaintext;
-    if (type == CiphertextMessage.prekeyType) {
+    if (type == 3) { // 3 = PREKEY_TYPE in libsignal_protocol_dart
       final preKeyMsg = PreKeySignalMessage(ciphertextBytes);
       plaintext = await cipher.decryptWithCallback(
         preKeyMsg,
@@ -103,11 +102,16 @@ class SignalSessionService {
       signedPreKeyPublic.serialize(),
     );
 
+    final localRegistrationId = await store.getLocalRegistrationId();
+
+    // Generate a dummy one-time prekey (required by PreKeyBundle constructor)
+    final oneTimePreKeyPair = Curve.generateKeyPair();
+
     final bundle = PreKeyBundle(
-      store.getLocalRegistrationId(),     // registration ID
+      localRegistrationId,                 // registration ID
       remoteAddress.getDeviceId(),         // device ID
-      0,                                   // prekey ID (0 = none in minimal flow)
-      null,                                // prekey public key (null in minimal flow)
+      1,                                   // prekey ID
+      oneTimePreKeyPair.publicKey,        // one-time prekey public key
       signedPreKeyId,
       signedPreKeyPublic,
       signedPreKeySignature,

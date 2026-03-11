@@ -16,6 +16,7 @@ import (
 	"github.com/ghostmsg/relay/internal/redisstore"
 	"github.com/ghostmsg/relay/internal/ws"
 	"github.com/gorilla/websocket"
+	"github.com/joho/godotenv"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -34,7 +35,10 @@ func main() {
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	log.Logger = log.With().Str("svc", "ghost-relay").Logger()
 
-	port     := getEnv("PORT",      "8080")
+	// Load .env file (ignores error if running in production where file doesn't exist)
+	_ = godotenv.Load()
+
+	port := getEnv("PORT", "8080")
 	redisURL := getEnv("REDIS_URL", "redis://localhost:6379")
 
 	// ── Redis ─────────────────────────────────────────────────────────────────

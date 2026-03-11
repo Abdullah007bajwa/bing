@@ -82,6 +82,63 @@ func (s *Store) DeleteAll(ctx context.Context, userID string) error {
 	return s.rdb.Del(ctx, keys...).Err()
 }
 
+// ── Relay Hardening (Phase 4) ───────────────────────────────────────────────
+
+// CheckReplay uses SETNX to ensure a packet ID hasn't been seen recently.
+// Returns true if the packet is NEW (allowed), false if it's a replay.
+func (s *Store) CheckReplay(ctx context.Context, packetID string, ttl time.Duration) (bool, error) {
+	if packetID == "" {
+		return false, nil // reject packets without nonce
+	}
+	key := fmt.Sprintf("ghost:nonce:%s", packetID)
+	
+	// SETNX returns true if key was set (new packet), false if it existed (replay)
+	return s.rdb.SetNX(ctx, key, "1", ttl).Result()
+}
+
+// AllowRateLimit implements a token bucket algorithm via Redis Lua script.
+// Limits a user to 'capacity' packets, regenerating at 'ratePerMin'.
+func (s *Store) AllowRateLimit(ctx context.Context, userID string, capacity int, ratePerMin int) (bool, error) {
+	// Simple rate limiter script (token bucket)
+	script := `
+		var key = KEYS[1]
+		var capacity = tonumber(ARGV[1])
+		var rate = tonumber(ARGV[2])
+		var now = tonumber(ARGV[3])
+		
+		var info = redis.call("HMGET", key, "tokens", "last_update")
+		var tokens = tonumber(info[1])
+		var last_update = tonumber(info[2])
+		
+		if not tokens then
+			tokens = capacity
+			last_update = now
+		end
+		
+		-- replenish tokens based on time passed
+		local delta_min = (now - last_update) / 60.0
+		tokens = math.min(capacity, tokens + (delta_min * rate))
+		
+		if tokens >= 1 then
+			redis.call("HMSET", key, "tokens", tokens - 1, "last_update", now)
+			redis.call("EXPIRE", key, 3600) -- expire bucket after 1h inactivity
+			return 1
+		else
+			return 0
+		end
+	`
+	
+	now := time.Now().Unix()
+	key := fmt.Sprintf("ghost:ratelimit:%s", userID)
+	
+	val, err := s.rdb.Eval(ctx, script, []string{key}, capacity, ratePerMin, now).Result()
+	if err != nil {
+		return false, err
+	}
+	
+	return val.(int64) == 1, nil
+}
+
 // Close shuts down the Redis connection gracefully.
 func (s *Store) Close() error {
 	return s.rdb.Close()
