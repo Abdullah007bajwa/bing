@@ -1,15 +1,12 @@
 // lib/features/contacts/add_by_id_screen.dart
 // Add a remote contact by pasting their Ghost ID.
-// Fetches their public key from Supabase, then shows fingerprint for verification.
+// Uses RPC get_public_key_by_hash (RLS-safe), then shows confirmation + fingerprint + nickname.
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../../core/storage/secure_db.dart';
 import '../../core/identity/identity_service.dart';
-import '../../models/contact.dart';
-import '../../app_config.dart';
-import 'fingerprint_screen.dart';
+import 'contact_confirm_screen.dart';
 
 class AddByIdScreen extends StatefulWidget {
   const AddByIdScreen({super.key});
@@ -37,35 +34,36 @@ class _AddByIdScreenState extends State<AddByIdScreen> {
 
     try {
       final supabase = Supabase.instance.client;
-      final result   = await supabase
-          .from('users')
-          .select('user_id, public_key')
-          .eq('user_id', uid)
-          .single();
-
-      final pubKeyB64 = result['public_key'] as String;
-      final identity  = IdentityService();
-      final fingerprint = await identity.getFingerprint(pubKeyB64);
-      final now = DateTime.now().millisecondsSinceEpoch;
-
-      final contact = GhostContact(
-        userId:       uid,
-        publicKeyB64: pubKeyB64,
-        fingerprint:  fingerprint,
-        addedAt:      now,
+      // RPC bypasses RLS SELECT; returns public_key only when user_id matches
+      final result = await supabase.rpc(
+        'get_public_key_by_hash',
+        params: {'lookup_hash': uid},
       );
 
-      await SecureDb().upsertContact(contact.toDbMap());
+      if (result == null || result is! String || (result as String).isEmpty) {
+        setState(() { _error = 'User not found. Check the ID.'; _isLooking = false; });
+        return;
+      }
+
+      final pubKeyB64 = result as String;
+      final identity  = IdentityService();
+      final fingerprint = await identity.getFingerprint(pubKeyB64);
 
       if (mounted) {
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(builder: (_) => FingerprintScreen(contact: contact)),
+          MaterialPageRoute(
+            builder: (_) => ContactConfirmScreen(
+              userId:       uid,
+              publicKeyB64: pubKeyB64,
+              fingerprint:  fingerprint,
+            ),
+          ),
         );
       }
-    } on PostgrestException catch (e) {
+    } on PostgrestException catch (_) {
       setState(() { _error = 'User not found. Check the ID.'; _isLooking = false; });
-    } catch (e) {
+    } catch (_) {
       setState(() { _error = 'Network error. Try again.'; _isLooking = false; });
     }
   }

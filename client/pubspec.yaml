@@ -60,6 +60,7 @@ dependencies:
   share_plus: ^9.0.0
   path_provider: ^2.1.5
   path: ^1.9.0
+  shared_preferences: ^2.2.2            # Biometric lock preference
   flutter_dotenv: ^5.1.0               # Environment variables
 
 dev_dependencies:

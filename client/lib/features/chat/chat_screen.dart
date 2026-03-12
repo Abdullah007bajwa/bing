@@ -16,6 +16,7 @@ import '../../core/crypto/signal_session.dart';
 import '../../core/storage/secure_db.dart';
 import '../../core/storage/ephemeral_cache.dart';
 import '../../core/identity/identity_service.dart';
+import '../../relay/relay_coordinator.dart';
 import '../../relay/websocket_client.dart';
 import '../../models/contact.dart';
 import '../../models/message.dart';
@@ -34,10 +35,12 @@ class _ChatScreenState extends State<ChatScreen> {
   final _scrollController  = ScrollController();
   final _db       = SecureDb();
   final _cache    = EphemeralCache();
-  final _relay    = GhostRelayClient();
+  final _coordinator = RelayCoordinator();
   final _signal   = SignalSessionService();
   final _identity = IdentityService();
   final _uuid     = const Uuid();
+
+  GhostRelayClient get _relay => _coordinator.relay;
 
   late final InMemorySignalProtocolStore _signalStore;
   SessionCipher? _cipher;
@@ -74,43 +77,63 @@ class _ChatScreenState extends State<ChatScreen> {
     );
 
     // Load saved messages
-    final rows = await _db.getMessages(widget.contact.userId);
-    setState(() {
-      _messages = rows.map(GhostMessage.fromDbMap).toList();
-      _canSend  = true;
-    });
+    var rows = await _db.getMessages(widget.contact.userId);
+    _messages = rows.map(GhostMessage.fromDbMap).toList();
 
-    // Connect relay
-    _relay.onPacket = _onIncomingPacket;
+    // Process any buffered packets (received while contact list was open)
+    final buffered = _coordinator.getBufferedPackets(widget.contact.userId);
+    for (final packet in buffered) {
+      try {
+        final msgType = packet['msg_type'];
+        final typeInt = msgType == 'prekey' ? 3 : 2;
+        final normalized = Map<String, dynamic>.from(packet)..['type'] = typeInt;
+        final plaintext = await _signal.decryptMessage(cipher: _cipher!, packet: normalized);
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final msg = GhostMessage(
+          id:             _uuid.v4(),
+          conversationId: widget.contact.userId,
+          senderId:       widget.contact.userId,
+          ciphertext:     packet['ciphertext'] as String,
+          msgType:        MessageType.signal,
+          createdAt:      now,
+          ttlSeconds:    packet['ttl_seconds'] as int? ?? _ttlSeconds,
+          viewOnce:       packet['view_once'] as bool? ?? false,
+          status:         MessageStatus.delivered,
+        );
+        _cache.cacheMessage(msg.id, plaintext, ttl: Duration(seconds: msg.ttlSeconds));
+        await _db.insertMessage(msg.toDbMap());
+        await _db.markMessageRead(msg.id);
+        _messages.add(msg);
+      } catch (_) { /* skip undecryptable */ }
+    }
+
     _relay.onConnected    = () => setState(() => _isConnected = true);
     _relay.onDisconnected = (_) => setState(() => _isConnected = false);
-    await _relay.connect(
-      relayUrl: AppConfig.relayWssUrl,
-      userId:   _myUserId,
-    );
-    setState(() => _isConnected = true);
+    _isConnected = _coordinator.isConnected;
+
+    _coordinator.setCurrentChat(widget.contact.userId, _onIncomingPacket);
+
+    setState(() {
+      _messages = _messages;
+      _canSend  = true;
+    });
 
     // Periodic message purge (every 15s)
     _purgeTimer = Timer.periodic(const Duration(seconds: 15), (_) => _purgeExpired());
     _scrollToBottom();
   }
 
-  // ── Incoming encrypted packet (Sealed Sender Model) ──────────────────
+  // ── Incoming encrypted packet ───────────────────────────────────────
   Future<void> _onIncomingPacket(Map<String, dynamic> packet) async {
     if (_cipher == null) return;
 
     try {
-      // 🚨 SEALED SENDER ARCHITECTURE 🚨
-      // The Go relay server no longer attaches the 'from' metadata field.
-      // 
-      // How do we know who sent this message?
-      // Plausible deniability via trial decryption.
-      // We attempt to decrypt the raw payload using the current active Contact's session.
-      // If the Signal protocol HMAC fails, it throws InvalidMessageException,
-      // silently discarding it (meaning it was meant for another contact session).
-      // If it decrypts cleanly, the cryptographic proof guarantees it came from THIS contact.
-      
-      final plaintext = await _signal.decryptMessage(cipher: _cipher!, packet: packet);
+      // Relay sends msg_type (string); libsignal expects type (int): 3=PreKey, 2=Signal
+      final msgType = packet['msg_type'];
+      final typeInt = msgType == 'prekey' ? 3 : 2;
+      final normalized = Map<String, dynamic>.from(packet)..['type'] = typeInt;
+
+      final plaintext = await _signal.decryptMessage(cipher: _cipher!, packet: normalized);
       final now       = DateTime.now().millisecondsSinceEpoch;
       final msg       = GhostMessage(
         id:             _uuid.v4(),
@@ -169,8 +192,9 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _messages.add(msg));
     _scrollToBottom();
 
-    // Relay via WebSocket
+    // Relay via WebSocket (id required by server for replay protection)
     final sent = _relay.sendPacket({
+      'id':          msgId,
       'to':          widget.contact.userId,
       'ciphertext':  encrypted['ciphertext'],
       'msg_type':    encrypted['type'] == 1 ? 'prekey' : 'signal',
@@ -210,6 +234,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    _coordinator.setCurrentChat(null, null);
     _purgeTimer?.cancel();
     _composeController.dispose();
     _scrollController.dispose();

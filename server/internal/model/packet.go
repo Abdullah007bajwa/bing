@@ -18,14 +18,17 @@ type Packet struct {
 }
 
 // Envelope wraps an incoming packet for local routing.
-// NO SENDER IDENTITY IS TRACKED (Sealed Sender Model).
+// SenderID is set so recipient can create contact on first message.
 type Envelope struct {
-	Packet Packet
+	Packet   Packet
+	SenderID string // user_id of sender (for Delivery.From)
 }
 
 // Delivery is sent back to the recipient.
-// Note: No 'From' field exists. The sender identity is sealed within the ciphertext.
+// From is used only for routing/trial-decrypt so recipient can create contact on first message.
+// Sender identity is still cryptographically sealed in the ciphertext.
 type Delivery struct {
+	From       string `json:"from"`        // sender user_id (routing only; not stored long-term by client)
 	Ciphertext string `json:"ciphertext"`  // pass-through, untouched
 	MsgType    string `json:"msg_type"`
 	TTL        int    `json:"ttl_seconds"`

@@ -104,25 +104,36 @@ class IdentityService {
         .join(' ');
   }
 
-  // ── Upload public key to Supabase ─────────────────────────────────────────
-  Future<bool> uploadPublicKey({
+  // ── Register/upsert identity to Supabase (idempotent) ────────────────────────
+  // Uses anon key; ON CONFLICT updates last_seen. Safe to retry when offline.
+  Future<bool> registerToSupabase({
     required String supabaseUrl,
     required String supabaseAnonKey,
-    required String jwtToken,
   }) async {
     final userId = await getUserId();
     final pubKey = await getPublicKeyBase64();
+    if (userId.isEmpty || pubKey.isEmpty) return false;
+
+    final nowIso = DateTime.now().toUtc().toIso8601String();
     final response = await http.post(
       Uri.parse('$supabaseUrl/rest/v1/users'),
       headers: {
         'apikey': supabaseAnonKey,
-        'Authorization': 'Bearer $jwtToken',
+        'Authorization': 'Bearer $supabaseAnonKey',
         'Content-Type': 'application/json',
-        'Prefer': 'return=minimal',
+        'Prefer': 'resolution=merge-duplicates,return=minimal',
       },
-      body: jsonEncode({'user_id': userId, 'public_key': pubKey}),
+      body: jsonEncode({
+        'user_id': userId,
+        'public_key': pubKey,
+        'last_seen': nowIso,
+      }),
     );
-    return response.statusCode == 201;
+    // 201 created or 200/204 from upsert
+    final ok = response.statusCode == 201 ||
+        response.statusCode == 200 ||
+        response.statusCode == 204;
+    return ok;
   }
 
   // ── Panic: Wipe all identity keys ─────────────────────────────────────────

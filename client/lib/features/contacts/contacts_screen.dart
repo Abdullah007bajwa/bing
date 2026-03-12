@@ -6,11 +6,16 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import '../../core/storage/secure_db.dart';
+import '../../core/identity/identity_service.dart';
+import '../../relay/relay_coordinator.dart';
 import '../../models/contact.dart';
+import '../../app_config.dart';
 import '../chat/chat_screen.dart';
 import '../settings/panic_wipe_screen.dart';
 import 'qr_scanner_screen.dart';
 import 'add_by_id_screen.dart';
+import '../settings/settings_screen.dart';
+import '../settings/ghost_id_screen.dart';
 
 class ContactsScreen extends StatefulWidget {
   const ContactsScreen({super.key});
@@ -27,15 +32,29 @@ class _ContactsScreenState extends State<ContactsScreen> {
   @override
   void initState() {
     super.initState();
-    _loadContacts();
+    _init();
+  }
+
+  Future<void> _init() async {
+    final identity = IdentityService();
+    final userId = await identity.getUserId();
+    if (userId.isNotEmpty) {
+      await RelayCoordinator().connect(
+        relayUrl: AppConfig.relayWssUrl,
+        userId:   userId,
+      );
+    }
+    await _loadContacts();
   }
 
   Future<void> _loadContacts() async {
     final rows = await _db.getAllContacts();
-    setState(() {
-      _contacts = rows.map(GhostContact.fromDbMap).toList();
-      _loading  = false;
-    });
+    if (mounted) {
+      setState(() {
+        _contacts = rows.map(GhostContact.fromDbMap).toList();
+        _loading  = false;
+      });
+    }
   }
 
   @override
@@ -53,7 +72,14 @@ class _ContactsScreenState extends State<ContactsScreen> {
           ],
         ),
         actions: [
-          // Panic wipe — emergency
+          IconButton(
+            icon: Icon(Icons.settings_rounded, color: cs.onSurface),
+            tooltip: 'Settings',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+            ).then((_) => _loadContacts()),
+          ),
           IconButton(
             icon: Icon(Icons.local_fire_department_rounded, color: cs.error),
             tooltip: 'Panic Wipe',
@@ -144,18 +170,19 @@ class _ContactsScreenState extends State<ContactsScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(width: 40, height: 4, decoration: BoxDecoration(
-              color: Colors.white24, borderRadius: BorderRadius.circular(2),
-            )),
-            const SizedBox(height: 20),
-            Text('Add Contact', style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.w700)),
-            const SizedBox(height: 24),
-            _BottomSheetOption(
+      builder: (ctx) => SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(width: 40, height: 4, decoration: BoxDecoration(
+                color: Colors.white24, borderRadius: BorderRadius.circular(2),
+              )),
+              const SizedBox(height: 20),
+              Text('Add Contact', style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 24),
+              _BottomSheetOption(
               icon:  Icons.qr_code_scanner_rounded,
               label: 'Scan QR Code',
               sub:   'Nearby contact',
@@ -177,7 +204,18 @@ class _ContactsScreenState extends State<ContactsScreen> {
               },
             ),
             const SizedBox(height: 12),
-          ],
+            _BottomSheetOption(
+              icon:  Icons.qr_code_rounded,
+              label: 'Share my Ghost ID',
+              sub:   'QR code or link — anytime',
+              onTap: () {
+                Navigator.pop(ctx);
+                Navigator.push(context, MaterialPageRoute(builder: (_) => const GhostIdScreen()));
+              },
+            ),
+            const SizedBox(height: 12),
+            ],
+          ),
         ),
       ),
     );

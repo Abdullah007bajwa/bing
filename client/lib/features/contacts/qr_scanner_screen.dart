@@ -6,10 +6,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import '../../core/storage/secure_db.dart';
 import '../../core/identity/identity_service.dart';
-import '../../models/contact.dart';
-import 'fingerprint_screen.dart';
+import 'contact_confirm_screen.dart';
 
 class QrScannerScreen extends StatefulWidget {
   const QrScannerScreen({super.key});
@@ -48,27 +46,23 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
     final contactUserId = parts[0];
     final pubKeyB64     = parts[1];
 
-    await _saveContact(contactUserId, pubKeyB64);
+    await _onContactScanned(contactUserId, pubKeyB64);
   }
 
-  Future<void> _saveContact(String uid, String pubKeyB64) async {
+  Future<void> _onContactScanned(String uid, String pubKeyB64) async {
     final identity    = IdentityService();
     final fingerprint = await identity.getFingerprint(pubKeyB64);
-    final now         = DateTime.now().millisecondsSinceEpoch;
-
-    final contact = GhostContact(
-      userId:       uid,
-      publicKeyB64: pubKeyB64,
-      fingerprint:  fingerprint,
-      addedAt:      now,
-    );
-
-    await SecureDb().upsertContact(contact.toDbMap());
 
     if (mounted) {
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => FingerprintScreen(contact: contact)),
+        MaterialPageRoute(
+          builder: (_) => ContactConfirmScreen(
+            userId:       uid,
+            publicKeyB64: pubKeyB64,
+            fingerprint:  fingerprint,
+          ),
+        ),
       );
     }
   }

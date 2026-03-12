@@ -37,14 +37,14 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     final uid = await _identity.getUserId();
     final pk  = await _identity.getPublicKeyBase64();
 
-    // Upload public key to Supabase (fire-and-forget; failure is non-fatal)
-    unawaited(
-      _identity.uploadPublicKey(
-        supabaseUrl:      AppConfig.supabaseUrl,
-        supabaseAnonKey:  AppConfig.supabaseAnonKey,
-        jwtToken:         uid, // anonymous JWT; configure Supabase anon auth
-      ),
+    // Idempotent registration: upsert public key to Supabase (anon key, no JWT)
+    final registered = await _identity.registerToSupabase(
+      supabaseUrl:     AppConfig.supabaseUrl,
+      supabaseAnonKey: AppConfig.supabaseAnonKey,
     );
+    if (!registered) {
+      // Non-fatal: allow offline; will retry on next launch via ensureRegistered
+    }
 
     setState(() {
       _isGenerating = false;

@@ -79,6 +79,7 @@ func (h *Hub) Run(ctx context.Context) {
 // route either delivers to an online client or stores in Redis for TTL.
 func (h *Hub) route(env model.Envelope) {
 	delivery := model.Delivery{
+		From:       env.SenderID,
 		Ciphertext: env.Packet.Ciphertext,
 		MsgType:    env.Packet.MsgType,
 		TTL:        env.Packet.TTL,
@@ -212,6 +213,6 @@ func (h *Hub) HandleClient(c *Client) {
 
 		// ────────────────────────────────────────────────────────────────────
 
-		h.relay <- model.Envelope{Packet: pkt}
+		h.relay <- model.Envelope{Packet: pkt, SenderID: c.ID}
 	}
 }

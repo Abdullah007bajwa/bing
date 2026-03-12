@@ -5,10 +5,52 @@ allprojects {
     }
 }
 
+// ── FIX FOR FLUTTER_WINDOWMANAGER JCENTER TIMEOUT ──
+def disableJcenter = { ArtifactRepository repo ->
+    if (repo instanceof MavenArtifactRepository) {
+        def url = repo.url.toString()
+        if (url.startsWith("https://jcenter.bintray.com")) {
+            project.logger.warn("Intercepted jcenter() request! Redirecting to mavenCentral.")
+            repo.setUrl("https://repo1.maven.org/maven2/")
+        }
+    }
+}
+
+allprojects {
+    buildscript {
+        repositories.all(disableJcenter)
+    }
+    repositories.all(disableJcenter)
+}
+
 rootProject.buildDir = "../build"
 subprojects {
     project.buildDir = "${rootProject.buildDir}/${project.name}"
 }
+// ── FIX FOR ANDROID GRADLE PLUGIN 8.0+ MISSING NAMESPACE IN CUSTOM PLUGINS ──
+subprojects {
+    afterEvaluate { project ->
+        if (project.hasProperty('android')) {
+            project.android {
+                if (namespace == null || namespace.isEmpty()) {
+                    def defaultNamespace = project.group.toString() ?: project.name.toString()
+                    try {
+                        def manifestPath = project.file("src/main/AndroidManifest.xml")
+                        if (manifestPath.exists()) {
+                            def manifestXml = new XmlParser().parse(manifestPath)
+                            defaultNamespace = manifestXml.@package
+                        }
+                    } catch (Exception e) {}
+                    namespace = defaultNamespace
+                }
+                
+                // FIX FOR AAPT lStar/Activity Error: Force plugins to use new API 35
+                compileSdkVersion 35
+            }
+        }
+    }
+}
+
 subprojects {
     project.evaluationDependsOn(":app")
 }

@@ -1,31 +1,27 @@
 // lib/main.dart
 // Ghost — Military-grade private messaging.
-// Entry point: sets up security flags, initializes services, routes to onboarding or home.
+// Entry point: security flags (screenshot block always on), services, onboarding or home.
 
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:flutter_windowmanager/flutter_windowmanager.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'core/identity/identity_service.dart';
-import 'core/storage/secure_db.dart';
+import 'core/security/app_security_service.dart';
 import 'core/storage/ephemeral_cache.dart';
 import 'core/push/push_service.dart';
 import 'features/onboarding/onboarding_screen.dart';
 import 'features/contacts/contacts_screen.dart';
+import 'features/security/biometric_lock_screen.dart';
 import 'app_config.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await dotenv.load(fileName: ".env");
 
-  // ── Block screenshots immediately on launch ──────────────────────────────
-  if (Platform.isAndroid) {
-    await FlutterWindowManager.addFlags(FlutterWindowManager.FLAG_SECURE);
-  }
+  // ── Screenshot/screen record block: always on, no user toggle ────────────
+  await AppSecurityService().enforceScreenshotProtection();
 
   // ── Initialize Push Notifications (Silent Wake-ups) ────────────────────
   await PushService().initialize();
@@ -44,6 +40,14 @@ void main() async {
   final keyPair   = await identity.loadIdentityKeyPair();
   final isNewUser = keyPair == null;
 
+  // Existing user: ensure identity is registered in Supabase (idempotent, retry if was offline)
+  if (!isNewUser) {
+    await identity.registerToSupabase(
+      supabaseUrl:     AppConfig.supabaseUrl,
+      supabaseAnonKey: AppConfig.supabaseAnonKey,
+    );
+  }
+
   runApp(GhostApp(isNewUser: isNewUser));
 }
 
@@ -56,10 +60,15 @@ class GhostApp extends StatefulWidget {
 }
 
 class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
+  bool _locked = true;
+  bool _biometricEnabled = false;
+  bool _checkedBiometric = false;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _checkBiometricAndUnlock();
   }
 
   @override
@@ -68,17 +77,52 @@ class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  // ── Clear ephemeral cache when app goes to background ────────────────────
+  Future<void> _checkBiometricAndUnlock() async {
+    final enabled = await AppSecurityService().isBiometricLockEnabled();
+    if (mounted) {
+      setState(() {
+        _biometricEnabled = enabled;
+        _checkedBiometric = true;
+        _locked = enabled;
+      });
+      if (!enabled) _locked = false;
+    }
+  }
+
+  void _onUnlocked() {
+    if (mounted) setState(() => _locked = false);
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       EphemeralCache().clear();
     }
+    if (state == AppLifecycleState.resumed) {
+      AppSecurityService().enforceScreenshotProtection();
+      if (_biometricEnabled && mounted) setState(() => _locked = true);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    if (!_checkedBiometric) {
+      return const MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: Scaffold(
+          backgroundColor: Color(0xFF0A0B0D),
+          body: Center(child: CircularProgressIndicator()),
+        ),
+      );
+    }
+    if (_locked && _biometricEnabled) {
+      return MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: _buildTheme(),
+        home: BiometricLockScreen(onUnlocked: _onUnlocked),
+      );
+    }
     return MaterialApp(
       title:            'Ghost',
       debugShowCheckedModeBanner: false,
