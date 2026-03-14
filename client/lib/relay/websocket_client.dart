@@ -58,7 +58,7 @@ class GhostRelayClient {
   }) async {
     final uid = userId.trim();
     if (uid.isEmpty) {
-      if (kDebugMode) debugPrint('[GhostRelay] Cannot connect: userId is empty');
+      if (kDebugMode) debugPrint('[Relay] Connect skipped: empty uid');
       onDisconnected?.call('missing uid');
       return;
     }
@@ -71,38 +71,31 @@ class GhostRelayClient {
     if (_disposed) return;
     final uid = _userIdHeader;
     if (uid == null || uid.isEmpty) {
-      if (kDebugMode) debugPrint('[GhostRelay] Reconnect skipped: no uid');
+      if (kDebugMode) debugPrint('[Relay] Reconnect skipped: no uid');
       return;
     }
     final uri = buildConnectionUri(_relayUrl!, uid);
-    if (kDebugMode) {
-      debugPrint('[GhostRelay] Relay URL: $uri');
-      debugPrint('[GhostRelay] Connecting to ${uri.scheme}://${uri.host}${uri.path}?uid=${uid.length > 4 ? "${uid.substring(0, 4)}…" : "***"}');
-    }
     try {
       _channel = WebSocketChannel.connect(uri);
       await _channel!.ready;
 
       _reconnectAttempts = 0;
-      if (kDebugMode) debugPrint('[GhostRelay] Connected successfully');
 
-      // Send authentication handshake if available; allow sends after connect (server may not send auth_ok)
-      if (_authHandshake != null) {
-        _channel!.sink.add(jsonEncode(_authHandshake));
-        if (kDebugMode) debugPrint('[GhostRelay] Sent authentication handshake');
-      }
-      _authenticated = true;
-
-      onConnected?.call();
-
+      // Subscribe FIRST so we never miss a frame (e.g. deliverPending sent immediately after register)
       _subscription = _channel!.stream.listen(
         _onData,
         onError: _onError,
         onDone:  _onDone,
       );
+
+      if (_authHandshake != null) {
+        _channel!.sink.add(jsonEncode(_authHandshake));
+      }
+      _authenticated = true;
+      onConnected?.call();
     } catch (e) {
       _authenticated = false;
-      if (kDebugMode) debugPrint('[GhostRelay] Connect failed: $e');
+      if (kDebugMode) debugPrint('[Relay] Connect failed: $e');
       onDisconnected?.call(e.toString());
       _scheduleReconnect();
     }
@@ -111,17 +104,17 @@ class GhostRelayClient {
   void _onData(dynamic raw) {
     try {
       final packet = jsonDecode(raw as String) as Map<String, dynamic>;
-      if (kDebugMode) {
-        final type = packet['type'] ?? packet['from'];
-        debugPrint('[GhostRelay] Received: ${type != null ? "type/from=$type" : "packet"}');
-      }
-      // Optional: if relay sends auth_ok, mark authenticated (already set on connect)
       final authOk = packet['type'] == 'auth_ok' || packet['auth'] == true;
-      if (authOk) _authenticated = true;
+      if (authOk) {
+        _authenticated = true;
+        return;
+      }
+      if (packet.containsKey('from')) {
+        final from = packet['from'] as String?;
+        if (kDebugMode) debugPrint('[Relay] RECV from=${from != null && from.length > 6 ? "${from.substring(0, 6)}…" : from}');
+      }
       onPacket?.call(packet);
-    } catch (_) {
-      // Malformed packet — silently discard (never crash on relay data)
-    }
+    } catch (_) {}
   }
 
   void _onError(Object error) {
@@ -140,21 +133,16 @@ class GhostRelayClient {
   /// Sends only when channel is connected. Logs in debug. Returns false if not connected or on error.
   bool sendPacket(Map<String, dynamic> packet) {
     if (_channel == null) {
-      if (kDebugMode) debugPrint('[GhostRelay] sendPacket skipped: channel null');
+      if (kDebugMode) debugPrint('[Relay] sendPacket: not connected');
       return false;
     }
     if (!_authenticated) {
-      if (kDebugMode) debugPrint('[GhostRelay] sendPacket skipped: not authenticated');
+      if (kDebugMode) debugPrint('[Relay] sendPacket: not authenticated');
       return false;
     }
     try {
       final json = jsonEncode(packet);
       _channel!.sink.add(json);
-      if (kDebugMode) {
-        final to = packet['to'] as String?;
-        final id = packet['id'] as String?;
-        debugPrint('[GhostRelay] Sent packet to=${to ?? "?"} id=${id != null ? "${id.substring(0, 8)}…" : "?"}');
-      }
       return true;
     } catch (e) {
       if (kDebugMode) debugPrint('[GhostRelay] sendPacket error: $e');
@@ -174,7 +162,6 @@ class GhostRelayClient {
       ),
     );
     _reconnectAttempts++;
-    if (kDebugMode) debugPrint('[GhostRelay] Reconnecting in ${delay.inSeconds}s (attempt $_reconnectAttempts)');
     _reconnectTimer = Timer(delay, _doConnect);
   }
 

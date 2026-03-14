@@ -4,7 +4,7 @@
 // when first message is received (no notification on add; conversation appears on first message).
 
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
+import 'package:flutter/foundation.dart';
 import '../core/identity/identity_service.dart';
 import '../core/storage/secure_db.dart';
 import '../relay/relay_auth_service.dart';
@@ -35,20 +35,12 @@ class RelayCoordinator {
   Future<void> connect({required String relayUrl, required String userId}) async {
     if (userId.trim().isEmpty) return;
 
-    // Always set callbacks first so packets are handled and UI state is correct
     _relay.onPacket = _onPacket;
-    _relay.onConnected = () {
-      _connected = true;
-      if (kDebugMode) debugPrint('[RelayCoordinator] onConnected: _connected=true');
-    };
-    _relay.onDisconnected = (reason) {
-      _connected = false;
-      if (kDebugMode) debugPrint('[RelayCoordinator] onDisconnected: $reason');
-    };
+    _relay.onConnected = () => _connected = true;
+    _relay.onDisconnected = (_) => _connected = false;
 
     if (_relay.isConnected) {
       _connected = true;
-      if (kDebugMode) debugPrint('[RelayCoordinator] Already connected, callbacks set');
       return;
     }
 
@@ -70,16 +62,11 @@ class RelayCoordinator {
 
     await _relay.connect(relayUrl: relayUrl, userId: userId);
     _connected = _relay.isConnected;
-    if (kDebugMode) debugPrint('[RelayCoordinator] connect done, _connected=$_connected');
   }
 
   void _onPacket(Map<String, dynamic> packet) {
     final from = packet['from'] as String?;
     if (from == null || from.isEmpty) return;
-    if (kDebugMode) {
-      final id = packet['id'] as String?;
-      debugPrint('[RelayCoordinator] Packet received from=${from.length > 8 ? "${from.substring(0, 8)}…" : from} id=${id != null ? "${id.length > 8 ? id.substring(0, 8) : id}…" : "?"}');
-    }
 
     _ensureContactFor(from);
     _buffer.putIfAbsent(from, () => []).add(packet);

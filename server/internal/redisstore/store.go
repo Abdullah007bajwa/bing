@@ -1,8 +1,9 @@
 // server/internal/redisstore/store.go
 // Redis ephemeral message store.
-// Key pattern: ghost:pending:<user_id>:<msg_id>
-// Every key has TTL — messages self-destruct on expiry.
-// No plaintext is ever stored. Only base64 ciphertext blobs.
+// Key pattern: ghost:pending:<user_id>
+// Value: Redis list of JSON blobs (ciphertext-only payloads / receipts).
+// Key has TTL — pending queue self-destructs on expiry.
+// No plaintext is ever stored. Only encrypted payloads and metadata.
 
 package redisstore
 
@@ -15,6 +16,10 @@ import (
 )
 
 const keyPrefix = "ghost:pending:"
+
+func pendingKey(userID string) string {
+	return fmt.Sprintf("%s%s", keyPrefix, userID)
+}
 
 type Store struct {
 	rdb *redis.Client
@@ -42,44 +47,46 @@ func NewStore(redisURL string) (*Store, error) {
 
 // Store saves an encrypted packet blob under the recipient's key with TTL.
 func (s *Store) Store(ctx context.Context, toUserID, msgID string, data []byte, ttl time.Duration) error {
-	key := fmt.Sprintf("%s%s:%s", keyPrefix, toUserID, msgID)
-	return s.rdb.Set(ctx, key, data, ttl).Err()
+	key := pendingKey(toUserID)
+	if err := s.rdb.RPush(ctx, key, data).Err(); err != nil {
+		return err
+	}
+
+	// Maintain TTL on the pending queue. Use the maximum TTL seen so we don't shorten expiry.
+	if ttl <= 0 {
+		return nil
+	}
+	current, err := s.rdb.TTL(ctx, key).Result()
+	if err != nil {
+		return err
+	}
+	if current < 0 || ttl > current {
+		return s.rdb.Expire(ctx, key, ttl).Err()
+	}
+	return nil
 }
 
 // FetchAll returns all pending encrypted packets for a user.
 func (s *Store) FetchAll(ctx context.Context, userID string) ([][]byte, error) {
-	pattern := fmt.Sprintf("%s%s:*", keyPrefix, userID)
-	keys, err := s.rdb.Keys(ctx, pattern).Result()
+	key := pendingKey(userID)
+	values, err := s.rdb.LRange(ctx, key, 0, -1).Result()
 	if err != nil {
 		return nil, err
 	}
-	if len(keys) == 0 {
+	if len(values) == 0 {
 		return nil, nil
 	}
-
-	values, err := s.rdb.MGet(ctx, keys...).Result()
-	if err != nil {
-		return nil, err
-	}
-
 	out := make([][]byte, 0, len(values))
 	for _, v := range values {
-		if v == nil {
-			continue
-		}
-		out = append(out, []byte(v.(string)))
+		out = append(out, []byte(v))
 	}
 	return out, nil
 }
 
 // DeleteAll removes all pending packets for a user after delivery.
 func (s *Store) DeleteAll(ctx context.Context, userID string) error {
-	pattern := fmt.Sprintf("%s%s:*", keyPrefix, userID)
-	keys, err := s.rdb.Keys(ctx, pattern).Result()
-	if err != nil || len(keys) == 0 {
-		return err
-	}
-	return s.rdb.Del(ctx, keys...).Err()
+	key := pendingKey(userID)
+	return s.rdb.Del(ctx, key).Err()
 }
 
 // ── Relay Hardening (Phase 4) ───────────────────────────────────────────────

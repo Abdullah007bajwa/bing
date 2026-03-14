@@ -203,12 +203,6 @@ class AppInitializationService {
         identityKeyPair: identityKeyPair,
       );
 
-      if (kDebugMode) {
-        debugPrint(
-          '[AppInit] Generated relay handshake: $handshake',
-        );
-      }
-
       // Set handshake on relay client before connecting
       _relayClient.setAuthHandshake(handshake);
 

@@ -5,7 +5,6 @@
 // Screenshot blocked app-wide (FLAG_SECURE / screen_protector).
 
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -88,9 +87,10 @@ class _ChatScreenState extends State<ChatScreen> {
     var rows = await _db.getMessages(widget.contact.userId);
     _messages = rows.map(GhostMessage.fromDbMap).toList();
 
-    // Re-decrypt loaded messages so reopening chat shows plaintext (cache was cleared on previous dispose)
+    // Re-decrypt only received messages (we can't decrypt our own sent messages with the session)
     for (final msg in _messages) {
       if (_cache.getMessage(msg.id) != null) continue;
+      if (msg.senderId == _myUserId) continue; // sent by me: plaintext only in cache; keep cache across navigations
       try {
         final typeInt = msg.msgType == MessageType.preKey ? 3 : 2;
         final normalized = {'type': typeInt, 'ciphertext': msg.ciphertext, 'ttl_seconds': msg.ttlSeconds};
@@ -130,17 +130,17 @@ class _ChatScreenState extends State<ChatScreen> {
 
     if (!mounted) return;
 
-    // Set relay callbacks with mounted checks
+    final prevOnConnected = _relay.onConnected;
+    final prevOnDisconnected = _relay.onDisconnected;
     _relay.onConnected = () {
+      prevOnConnected?.call();
       if (mounted) setState(() => _isConnected = true);
-      if (kDebugMode) debugPrint('[ChatScreen] relay onConnected');
     };
     _relay.onDisconnected = (reason) {
+      prevOnDisconnected?.call(reason);
       if (mounted) setState(() => _isConnected = false);
-      if (kDebugMode) debugPrint('[ChatScreen] relay onDisconnected: $reason');
     };
     _isConnected = _relay.isConnected || _coordinator.isConnected;
-    if (kDebugMode) debugPrint('[ChatScreen] uid=$_myUserId relay=${_relay.isConnected} coordinator=${_coordinator.isConnected} isConnected=$_isConnected');
 
     _coordinator.setCurrentChat(widget.contact.userId, _onIncomingPacket);
 
@@ -160,18 +160,33 @@ class _ChatScreenState extends State<ChatScreen> {
   // ── Incoming encrypted packet ───────────────────────────────────────
   Future<void> _onIncomingPacket(Map<String, dynamic> packet) async {
     if (_cipher == null || !mounted) return;
-    if (kDebugMode) debugPrint('[ChatScreen] packet received from=${packet['from']} to=${packet['to']} id=${packet['id']}');
 
     try {
-      // Relay sends msg_type (string); libsignal expects type (int): 3=PreKey, 2=Signal
+      // Read receipt (double-tick): { type: "receipt", receipt: "read", msg_id: "...", from: "..." }
+      if (packet['type'] == 'receipt' || packet['receipt'] == 'read') {
+        final msgId = packet['msg_id'] as String?;
+        if (msgId == null || msgId.isEmpty) return;
+        await _db.updateMessageStatus(msgId, MessageStatus.read.index);
+        if (!mounted) return;
+        setState(() {
+          final idx = _messages.indexWhere((m) => m.id == msgId);
+          if (idx != -1) {
+            _messages[idx] = _messages[idx].copyWith(status: MessageStatus.read);
+          }
+        });
+        return;
+      }
+
       final msgType = packet['msg_type'];
-      final typeInt = msgType == 'prekey' ? 3 : 2;
+      final typeInt = (msgType == 'prekey' || msgType == 0) ? 3 : 2;
       final normalized = Map<String, dynamic>.from(packet)..['type'] = typeInt;
 
       final plaintext = await _signal.decryptMessage(cipher: _cipher!, packet: normalized);
       final now       = DateTime.now().millisecondsSinceEpoch;
+      final incomingId = (packet['id'] as String?)?.trim();
       final msg       = GhostMessage(
-        id:             _uuid.v4(),
+        // Preserve sender-chosen packet id so receipts can reference it
+        id:             (incomingId != null && incomingId.isNotEmpty) ? incomingId : _uuid.v4(),
         conversationId: widget.contact.userId,
         senderId:       widget.contact.userId,
         ciphertext:     packet['ciphertext'] as String,
@@ -190,12 +205,25 @@ class _ChatScreenState extends State<ChatScreen> {
       await _db.insertMessage(msg.toDbMap());
       await _db.markMessageRead(msg.id);
 
+      // Send read receipt back to sender (no plaintext; metadata only)
+      final to = packet['from'] as String?;
+      if (to != null && to.isNotEmpty && _relay.isConnected) {
+        _relay.sendPacket({
+          'type':    'receipt',
+          'id':      _uuid.v4(), // unique nonce for replay protection
+          'to':      to,
+          'receipt': 'read',
+          'msg_id':  msg.id,
+          'ttl_seconds': 3600,
+        });
+      }
+
       if (!mounted) return;
 
       setState(() => _messages.add(msg));
       _scrollToBottom();
-    } catch (e, st) {
-      if (kDebugMode) debugPrint('[MessagePipeline] decrypt failed: $e');
+  } catch (e) {
+      if (kDebugMode) debugPrint('[Chat] Decrypt failed: $e');
     }
   }
 
@@ -217,12 +245,11 @@ class _ChatScreenState extends State<ChatScreen> {
     _composeController.clear();
     HapticFeedback.lightImpact();
 
-    if (kDebugMode) debugPrint('[MessagePipeline] encrypt start');
     Map<String, dynamic> encrypted;
     try {
       encrypted = await _signal.encryptMessage(cipher: _cipher!, plaintext: text);
     } catch (e) {
-      if (kDebugMode) debugPrint('[MessagePipeline] encrypt error: $e');
+      if (kDebugMode) debugPrint('[Chat] Encrypt failed: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Encryption failed: $e')),
@@ -230,8 +257,6 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       return;
     }
-    if (kDebugMode) debugPrint('[MessagePipeline] encrypt success');
-
     final now       = DateTime.now().millisecondsSinceEpoch;
     final msgId     = _uuid.v4();
 
@@ -257,8 +282,6 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _messages.add(msg));
     _scrollToBottom();
 
-    // Relay via WebSocket: server expects id, to, ciphertext, msg_type, ttl_seconds; we add type, from, timestamp for consistency
-    if (kDebugMode) debugPrint('[MessagePipeline] sending to relay');
     final packet = {
       'type':        'message',
       'id':          msgId,
@@ -270,10 +293,9 @@ class _ChatScreenState extends State<ChatScreen> {
       'timestamp':   now,
     };
     final sent = _relay.sendPacket(packet);
-    if (kDebugMode) {
-      debugPrint(sent ? '[MessagePipeline] relay send success' : '[MessagePipeline] relay error (send returned false)');
-    }
+    if (!sent && kDebugMode) debugPrint('[Chat] Relay send failed');
 
+    if (sent) await _db.updateMessageStatus(msg.id, MessageStatus.sent.index);
     if (mounted) {
       setState(() {
         final idx = _messages.indexWhere((m) => m.id == msgId);
@@ -311,8 +333,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _purgeTimer?.cancel();
     _composeController.dispose();
     _scrollController.dispose();
-    // Do not evict session on dispose — keep cached so returning to chat does not rebuild session
-    _cache.clear();
+    // Do not clear cache on dispose — so reopening this chat shows plaintext (sent + received) until TTL
     super.dispose();
   }
 
@@ -440,7 +461,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 if (isMe) ...[
                   const SizedBox(width: 4),
                   Icon(
-                    msg.status == MessageStatus.sent ? Icons.check_rounded : Icons.access_time_rounded,
+                    msg.status == MessageStatus.sending
+                        ? Icons.access_time_rounded
+                        : (msg.status == MessageStatus.read || msg.status == MessageStatus.delivered)
+                            ? Icons.done_all_rounded
+                            : Icons.check_rounded,
                     size:  12,
                     color: Colors.black54,
                   ),

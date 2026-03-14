@@ -13,7 +13,6 @@ import (
 
 	"github.com/ghostmsg/relay/internal/model"
 	"github.com/ghostmsg/relay/internal/redisstore"
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
 )
@@ -79,11 +78,17 @@ func (h *Hub) Run(ctx context.Context) {
 // route either delivers to an online client or stores in Redis for TTL.
 func (h *Hub) route(env model.Envelope) {
 	delivery := model.Delivery{
-		From:       env.SenderID,
-		Ciphertext: env.Packet.Ciphertext,
-		MsgType:    env.Packet.MsgType,
-		TTL:        env.Packet.TTL,
-		ID:         uuid.NewString(),
+		From: env.SenderID,
+		ID:   env.Packet.ID, // Preserve sender-chosen id so clients can ack/read + dedup.
+	}
+	if env.Packet.Type == "receipt" {
+		delivery.Type = "receipt"
+		delivery.Receipt = env.Packet.Receipt
+		delivery.MsgID = env.Packet.MsgID
+	} else {
+		delivery.Ciphertext = env.Packet.Ciphertext
+		delivery.MsgType = env.Packet.MsgType
+		delivery.TTL = env.Packet.TTL
 	}
 	data, err := json.Marshal(delivery)
 	if err != nil {
@@ -107,12 +112,12 @@ func (h *Hub) route(env model.Envelope) {
 		default:
 			// Recipient's send buffer full — store in Redis
 			_ = h.store.Store(context.Background(), env.Packet.To, delivery.ID, data, ttl)
-			log.Info().Str("from", env.SenderID).Str("to", env.Packet.To).Msg("recipient buffer full, stored in Redis")
+			log.Info().Str("from", env.SenderID).Str("to", env.Packet.To).Str("pkt_id", env.Packet.ID).Msg("recipient buffer full, stored pending")
 		}
 	} else {
 		// Offline — store encrypted packet in Redis with TTL
 		_ = h.store.Store(context.Background(), env.Packet.To, delivery.ID, data, ttl)
-		log.Info().Str("from", env.SenderID).Str("to", env.Packet.To).Str("pkt_id", env.Packet.ID).Msg("recipient offline, stored in Redis")
+		log.Info().Str("from", env.SenderID).Str("to", env.Packet.To).Str("pkt_id", env.Packet.ID).Msg("recipient offline, stored pending")
 	}
 }
 
@@ -185,9 +190,19 @@ func (h *Hub) HandleClient(c *Client) {
 			continue // malformed — discard
 		}
 
-		// Basic validation: must have a recipient, ciphertext, and UID nonce
-		if pkt.To == "" || pkt.Ciphertext == "" || pkt.ID == "" {
+		// Basic validation
+		if pkt.To == "" || pkt.ID == "" {
 			continue
+		}
+		if pkt.Type == "receipt" {
+			if pkt.Receipt == "" || pkt.MsgID == "" {
+				continue
+			}
+		} else {
+			// Standard encrypted message packet
+			if pkt.Ciphertext == "" {
+				continue
+			}
 		}
 		// Never relay to self
 		if pkt.To == c.ID {
@@ -219,7 +234,7 @@ func (h *Hub) HandleClient(c *Client) {
 
 		// ────────────────────────────────────────────────────────────────────
 
-		log.Info().Str("from", c.ID).Str("to", pkt.To).Str("pkt_id", pkt.ID).Msg("packet accepted, relaying")
+		log.Info().Str("from", c.ID).Str("to", pkt.To).Str("pkt_id", pkt.ID).Str("type", pkt.Type).Msg("packet accepted, relaying")
 		h.relay <- model.Envelope{Packet: pkt, SenderID: c.ID}
 	}
 }

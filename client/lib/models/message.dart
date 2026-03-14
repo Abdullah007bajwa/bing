@@ -49,6 +49,7 @@ class GhostMessage {
     'created_at':      createdAt,
     'delete_at':       deleteAt,
     'view_once':       viewOnce ? 1 : 0,
+    'status':          status.index,
   };
 
   factory GhostMessage.fromDbMap(Map<String, dynamic> m) => GhostMessage(
@@ -63,6 +64,7 @@ class GhostMessage {
     createdAt:      m['created_at'] as int,
     deleteAt:       m['delete_at'] as int?,
     viewOnce:      (m['view_once'] as int) == 1,
+    status:         MessageStatus.values[m['status'] as int? ?? 1],
   );
 
   Map<String, dynamic> toRelayPacket(String toUserId) => {

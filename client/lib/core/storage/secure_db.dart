@@ -14,7 +14,7 @@ import 'package:path/path.dart' as path;
 
 const _kDbKeyStorageKey = 'ghost_db_encryption_key';
 const _kDbFileName      = 'ghost.db';
-const _kDbVersion       = 1;
+const _kDbVersion       = 2;
 
 class SecureDb {
   static final SecureDb _instance = SecureDb._();
@@ -65,7 +65,8 @@ class SecureDb {
         ttl_seconds     INTEGER NOT NULL DEFAULT 3600,
         created_at      INTEGER NOT NULL, -- unix timestamp ms
         delete_at       INTEGER,          -- unix timestamp ms; null = read-triggered
-        view_once       INTEGER NOT NULL DEFAULT 0
+        view_once       INTEGER NOT NULL DEFAULT 0,
+        status          INTEGER NOT NULL DEFAULT 1
       )
     ''');
 
@@ -115,7 +116,9 @@ class SecureDb {
   }
 
   Future<void> _upgradeSchema(Database db, int oldVersion, int newVersion) async {
-    // Future migrations go here
+    if (oldVersion < 2) {
+      await db.execute('ALTER TABLE messages ADD COLUMN status INTEGER NOT NULL DEFAULT 1');
+    }
   }
 
   // ── DB key management ─────────────────────────────────────────────────────
@@ -151,7 +154,17 @@ class SecureDb {
     final d = await db;
     await d.update(
       'messages',
-      {'is_read': 1, 'delete_at': DateTime.now().millisecondsSinceEpoch + 5000},
+      {'is_read': 1, 'delete_at': DateTime.now().millisecondsSinceEpoch + 5000, 'status': 3},
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+  }
+
+  Future<void> updateMessageStatus(String messageId, int status) async {
+    final d = await db;
+    await d.update(
+      'messages',
+      {'status': status},
       where: 'id = ?',
       whereArgs: [messageId],
     );
