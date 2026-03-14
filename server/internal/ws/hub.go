@@ -202,27 +202,35 @@ func (h *Hub) HandleClient(c *Client) {
 		}
 		c.Conn.SetReadDeadline(time.Now().Add(idleTimeout))
 
+		// Log that we received a frame (size only — never content)
+		log.Debug().Str("user", c.ID[:min(8, len(c.ID))]+"…").Int("size", len(raw)).Msg("ws message received")
+
 		var pkt model.Packet
 		if err := json.Unmarshal(raw, &pkt); err != nil {
-			continue // malformed — discard
+			log.Warn().Str("user", c.ID[:min(8, len(c.ID))]+"…").Err(err).Msg("packet dropped: malformed json")
+			continue
 		}
 
 		// Basic validation
 		if pkt.To == "" || pkt.ID == "" {
+			log.Warn().Str("user", c.ID[:min(8, len(c.ID))]+"…").Str("to", pkt.To).Str("id", pkt.ID).Msg("packet dropped: empty to or id")
 			continue
 		}
 		if pkt.Type == "receipt" {
 			if pkt.Receipt == "" || pkt.MsgID == "" {
+				log.Warn().Str("user", c.ID[:min(8, len(c.ID))]+"…").Msg("packet dropped: receipt missing receipt/msg_id")
 				continue
 			}
 		} else {
 			// Standard encrypted message packet
 			if pkt.Ciphertext == "" {
+				log.Warn().Str("user", c.ID[:min(8, len(c.ID))]+"…").Str("to", pkt.To).Str("pkt_id", pkt.ID).Msg("packet dropped: empty ciphertext")
 				continue
 			}
 		}
 		// Never relay to self
 		if pkt.To == c.ID {
+			log.Warn().Str("user", c.ID[:min(8, len(c.ID))]+"…").Msg("packet dropped: self-send")
 			continue
 		}
 

@@ -145,6 +145,12 @@ class GhostRelayClient {
     try {
       final json = jsonEncode(packet);
       _channel!.sink.add(json);
+      if (kDebugMode) {
+        final to = packet['to'] as String?;
+        final id = packet['id'] as String?;
+        final hasCipher = packet['ciphertext'] != null && (packet['ciphertext'] as String).isNotEmpty;
+        debugPrint('[Relay] SENT to=${to != null && to.length > 6 ? "${to.substring(0, 6)}…" : to} id=${id != null && id.length > 8 ? "${id.substring(0, 8)}…" : id} hasCipher=$hasCipher');
+      }
       return true;
     } catch (e) {
       if (kDebugMode) debugPrint('[GhostRelay] sendPacket error: $e');
