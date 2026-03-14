@@ -2,11 +2,12 @@
 // Scan a contact's QR code to extract their Ghost ID + public key.
 // Uses MLKit (Android) / AVFoundation (iOS) via mobile_scanner.
 
-import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import 'package:google_fonts/google_fonts.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import '../../core/identity/identity_service.dart';
+import '../../core/crypto/base64_util.dart';
 import 'contact_confirm_screen.dart';
 
 class QrScannerScreen extends StatefulWidget {
@@ -50,21 +51,46 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
   }
 
   Future<void> _onContactScanned(String uid, String pubKeyB64) async {
-    final identity    = IdentityService();
-    final fingerprint = await identity.getFingerprint(pubKeyB64);
+    try {
+      final identity = IdentityService();
+      final normalizedKey = base64Pad(pubKeyB64);
+      final fingerprint = await identity.getFingerprint(normalizedKey);
 
-    if (mounted) {
-      Navigator.pushReplacement(
+      if (fingerprint.isEmpty) {
+        if (mounted) _showRescanError();
+        return;
+      }
+
+      if (!mounted) return;
+      final result = await Navigator.push(
         context,
         MaterialPageRoute(
           builder: (_) => ContactConfirmScreen(
             userId:       uid,
-            publicKeyB64: pubKeyB64,
+            publicKeyB64: normalizedKey,
             fingerprint:  fingerprint,
           ),
         ),
       );
+
+      if (mounted && result != null) {
+        Navigator.pop(context, result);
+      }
+    } catch (e, st) {
+      if (kDebugMode) debugPrint('[QrScanner] Error: $e\n$st');
+      if (mounted) _showRescanError();
     }
+  }
+
+  void _showRescanError() {
+    _processed = false;
+    _controller.start();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Invalid QR code or key. Please scan again.'),
+        duration: Duration(seconds: 3),
+      ),
+    );
   }
 
   @override

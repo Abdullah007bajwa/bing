@@ -5,6 +5,9 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
+import 'base64_util.dart';
+import 'signal_session_builder.dart';
+import 'signal_keys_upload_service.dart';
 
 class SignalSessionService {
   static final SignalSessionService _instance = SignalSessionService._();
@@ -15,6 +18,7 @@ class SignalSessionService {
   final Map<String, SessionCipher> _sessionCache = {};
 
   // ── Initialize or restore a session with a contact ───────────────────────
+  /// Builds session using Supabase keys via SignalSessionBuilder
   Future<SessionCipher> getOrCreateSession({
     required String contactUserId,
     required String contactPublicKeyB64,
@@ -27,15 +31,30 @@ class SignalSessionService {
 
     final remoteAddress = SignalProtocolAddress(contactUserId, deviceId);
 
-    // Check if session exists in local DB already
+    // Check if session exists in local store already
     final hasSession = await store.containsSession(remoteAddress);
     if (!hasSession) {
-      // Perform X3DH key agreement and build initial session
-      await _buildInitialSession(
+      // Use SignalSessionBuilder to fetch keys from Supabase
+      final sessionBuilder = SignalSessionBuilder(
         store: store,
-        remoteAddress: remoteAddress,
-        contactPublicKeyB64: contactPublicKeyB64,
+        keysService: SignalKeysUploadService(),
       );
+
+      try {
+        final cipher = await sessionBuilder.buildSession(
+          recipientUserId: contactUserId,
+          deviceId: deviceId,
+        );
+        _sessionCache[contactUserId] = cipher;
+        return cipher;
+      } catch (e) {
+        // Fallback: build minimal session from contact public key
+        await _buildInitialSession(
+          store: store,
+          remoteAddress: remoteAddress,
+          contactPublicKeyB64: contactPublicKeyB64,
+        );
+      }
     }
 
     final cipher = SessionCipher.fromStore(store, remoteAddress);
@@ -62,7 +81,7 @@ class SignalSessionService {
     required SessionCipher cipher,
     required Map<String, dynamic> packet,
   }) async {
-    final ciphertextBytes = base64Decode(packet['ciphertext'] as String);
+    final ciphertextBytes = safeBase64Decode(packet['ciphertext'] as String);
     final type            = packet['type'] as int;
 
     Uint8List plaintext;
@@ -79,15 +98,14 @@ class SignalSessionService {
     return utf8.decode(plaintext);
   }
 
-  // ── Build initial X3DH session from remote public key ────────────────────
+  // ── Build minimal X3DH session from remote public key (fallback) ──────────
   Future<void> _buildInitialSession({
     required InMemorySignalProtocolStore store,
     required SignalProtocolAddress remoteAddress,
     required String contactPublicKeyB64,
   }) async {
     // Build a minimal PreKeyBundle from the contact's long-term identity key
-    // In production this would include signed prekeys fetched from Supabase
-    final identityKeyBytes = base64Decode(contactPublicKeyB64);
+    final identityKeyBytes = safeBase64Decode(contactPublicKeyB64);
     final identityKey      = IdentityKey(
       Curve.decodePoint(identityKeyBytes, 0),
     );

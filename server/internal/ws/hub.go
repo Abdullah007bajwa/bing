@@ -103,13 +103,16 @@ func (h *Hub) route(env model.Envelope) {
 		// Direct relay — no Redis touch
 		select {
 		case recipient.Send <- data:
+			log.Info().Str("from", env.SenderID).Str("to", env.Packet.To).Str("pkt_id", env.Packet.ID).Msg("delivered to online client")
 		default:
 			// Recipient's send buffer full — store in Redis
 			_ = h.store.Store(context.Background(), env.Packet.To, delivery.ID, data, ttl)
+			log.Info().Str("from", env.SenderID).Str("to", env.Packet.To).Msg("recipient buffer full, stored in Redis")
 		}
 	} else {
 		// Offline — store encrypted packet in Redis with TTL
 		_ = h.store.Store(context.Background(), env.Packet.To, delivery.ID, data, ttl)
+		log.Info().Str("from", env.SenderID).Str("to", env.Packet.To).Str("pkt_id", env.Packet.ID).Msg("recipient offline, stored in Redis")
 	}
 }
 
@@ -118,8 +121,11 @@ func (h *Hub) deliverPending(c *Client) {
 	ctx := context.Background()
 	packets, err := h.store.FetchAll(ctx, c.ID)
 	if err != nil {
+		log.Info().Str("user", c.ID).Err(err).Msg("deliverPending fetch failed")
 		return
 	}
+	n := len(packets)
+	log.Info().Str("user", c.ID).Int("count", n).Msg("deliverPending")
 	for _, p := range packets {
 		select {
 		case c.Send <- p:
@@ -213,6 +219,7 @@ func (h *Hub) HandleClient(c *Client) {
 
 		// ────────────────────────────────────────────────────────────────────
 
+		log.Info().Str("from", c.ID).Str("to", pkt.To).Str("pkt_id", pkt.ID).Msg("packet accepted, relaying")
 		h.relay <- model.Envelope{Packet: pkt, SenderID: c.ID}
 	}
 }

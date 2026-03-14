@@ -3,6 +3,7 @@
 // Entry point: security flags (screenshot block always on), services, onboarding or home.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' as foundation show debugPrint;
 import 'package:flutter/services.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -11,43 +12,79 @@ import 'core/identity/identity_service.dart';
 import 'core/security/app_security_service.dart';
 import 'core/storage/ephemeral_cache.dart';
 import 'core/push/push_service.dart';
+import 'core/crypto/prekey_management_service.dart';
 import 'features/onboarding/onboarding_screen.dart';
 import 'features/contacts/contacts_screen.dart';
+import 'core/auth/auth_gate.dart';
 import 'features/security/biometric_lock_screen.dart';
 import 'app_config.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await dotenv.load(fileName: ".env");
 
-  // ── Screenshot/screen record block: always on, no user toggle ────────────
-  await AppSecurityService().enforceScreenshotProtection();
+  var isNewUser = true;
 
-  // ── Initialize Push Notifications (Silent Wake-ups) ────────────────────
-  await PushService().initialize();
+  try {
+    await dotenv.load(fileName: ".env");
 
-  // ── Force portrait orientation ────────────────────────────────────────────
-  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+    // ── Screenshot/screen record block: always on, no user toggle ────────────
+    try {
+      await AppSecurityService().enforceScreenshotProtection();
+    } catch (e) {
+      foundation.debugPrint('[Main] enforceScreenshotProtection failed: $e');
+    }
 
-  // ── Initialize Supabase (anonymous — no auth session needed) ─────────────
-  await Supabase.initialize(
-    url:     AppConfig.supabaseUrl,
-    anonKey: AppConfig.supabaseAnonKey,
-  );
+    // ── Initialize Push Notifications (Silent Wake-ups) ────────────────────
+    try {
+      await PushService().initialize();
+    } catch (e) {
+      foundation.debugPrint('[Main] PushService.initialize failed: $e');
+    }
 
-  // ── Check if user is initialized ─────────────────────────────────────────
-  final identity  = IdentityService();
-  final keyPair   = await identity.loadIdentityKeyPair();
-  final isNewUser = keyPair == null;
+    // ── Force portrait orientation ────────────────────────────────────────────
+    try {
+      await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+    } catch (e) {
+      foundation.debugPrint('[Main] setPreferredOrientations failed: $e');
+    }
 
-  // Existing user: ensure identity is registered in Supabase (idempotent, retry if was offline)
-  if (!isNewUser) {
-    await identity.registerToSupabase(
-      supabaseUrl:     AppConfig.supabaseUrl,
-      supabaseAnonKey: AppConfig.supabaseAnonKey,
-    );
+    // ── Initialize Supabase (anonymous — no auth session needed) ─────────────
+    try {
+      await Supabase.initialize(
+        url:     AppConfig.supabaseUrl,
+        anonKey: AppConfig.supabaseAnonKey,
+      );
+    } catch (e) {
+      foundation.debugPrint('[Main] Supabase.initialize failed: $e');
+    }
+
+    // ── Check if user is initialized ─────────────────────────────────────────
+    try {
+      final identity  = IdentityService();
+      final keyPair   = await identity.loadIdentityKeyPair();
+      isNewUser = keyPair == null;
+
+      // Existing user: ensure identity is registered in Supabase (idempotent, retry if was offline)
+      if (!isNewUser) {
+        try {
+          await identity.registerToSupabase(
+            supabaseUrl:     AppConfig.supabaseUrl,
+            supabaseAnonKey: AppConfig.supabaseAnonKey,
+          );
+        } catch (e) {
+          foundation.debugPrint('[Main] registerToSupabase failed: $e');
+        }
+      }
+    } catch (e) {
+      foundation.debugPrint('[Main] Identity initialization failed: $e');
+      isNewUser = true; // safe fallback
+    }
+  } catch (e) {
+    foundation.debugPrint('[Main] App bootstrap failed: $e');
+    isNewUser = true;
   }
 
+  // Always run the app (AuthGate will make final decision)
   runApp(GhostApp(isNewUser: isNewUser));
 }
 
@@ -69,11 +106,25 @@ class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _checkBiometricAndUnlock();
+    _startBackgroundTasks();
+  }
+
+  Future<void> _startBackgroundTasks() async {
+    try {
+      final userId = await IdentityService().getUserId();
+      if (userId.isNotEmpty) {
+        // Start automatic prekey rotation every 24 hours
+        PrekeyManagementService().startAutoRotation(userId: userId);
+      }
+    } catch (e) {
+      foundation.debugPrint('[Main] Failed to start background tasks: $e');
+    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    PrekeyManagementService().stopAutoRotation();
     super.dispose();
   }
 
@@ -124,10 +175,11 @@ class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
       );
     }
     return MaterialApp(
-      title:            'Ghost',
+      title: 'Ghost',
       debugShowCheckedModeBanner: false,
-      theme:            _buildTheme(),
-      initialRoute:     widget.isNewUser ? '/onboarding' : '/home',
+      theme: _buildTheme(),
+      // Use AuthGate to safely determine landing screen based on session/state
+      home: AuthGate(isNewUser: widget.isNewUser),
       routes: {
         '/onboarding': (_) => const OnboardingScreen(),
         '/home':       (_) => const ContactsScreen(),

@@ -9,6 +9,7 @@ import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 import 'package:http/http.dart' as http;
+import '../crypto/base64_util.dart';
 
 const _kPrivKeyStorageKey = 'ghost_identity_priv_key';
 const _kPubKeyStorageKey  = 'ghost_identity_pub_key';
@@ -91,17 +92,21 @@ class IdentityService {
 
   // ── Key fingerprint (safety numbers) ─────────────────────────────────────
   // Returns 60-digit safety number formatted in groups of 5 (Signal-style)
+  // Uses padded base64 so QR/unpadded keys (e.g. 43 chars) decode correctly.
   Future<String> getFingerprint(String remotePublicKeyB64) async {
     final kp = await loadIdentityKeyPair();
     if (kp == null) return '';
-    final myBytes     = kp.getPublicKey().publicKey.serialize();
-    final remoteBytes = base64Decode(remotePublicKeyB64);
-    final combined    = Uint8List.fromList([...myBytes, ...remoteBytes]);
-    final digest      = crypto.sha256.convert(combined);
-    final hexString   = hex.encode(digest.bytes);
-    // Format as 12 groups of 5 digits
-    return List.generate(12, (i) => hexString.substring(i * 5, i * 5 + 5))
-        .join(' ');
+    try {
+      final remoteBytes = safeBase64Decode(remotePublicKeyB64);
+      final myBytes     = kp.getPublicKey().publicKey.serialize();
+      final combined    = Uint8List.fromList([...myBytes, ...remoteBytes]);
+      final digest      = crypto.sha256.convert(combined);
+      final hexString   = hex.encode(digest.bytes);
+      return List.generate(12, (i) => hexString.substring(i * 5, i * 5 + 5))
+          .join(' ');
+    } on FormatException {
+      return '';
+    }
   }
 
   // ── Register/upsert identity to Supabase (idempotent) ────────────────────────

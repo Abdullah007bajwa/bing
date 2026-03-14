@@ -65,7 +65,8 @@ class _ContactConfirmScreenState extends State<ContactConfirmScreen> {
           ),
         );
       }
-      Navigator.popUntil(context, ModalRoute.withName('/home'));
+      // Pop back to contacts screen (return the contact so caller knows it was added)
+      Navigator.pop(context, contact);
     }
   }
 

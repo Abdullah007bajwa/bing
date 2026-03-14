@@ -4,6 +4,7 @@
 
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 import 'package:uuid/uuid.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import '../identity/identity_service.dart';
 import '../crypto/signal_session.dart';
 import '../../relay/relay_coordinator.dart';
@@ -34,24 +35,27 @@ class ContactEstablishmentService {
     final store = InMemorySignalProtocolStore(kp, 1);
     SessionCipher cipher;
     try {
+      // Use shared session cache so opening chat with this contact reuses the same session
       cipher = await _signal.getOrCreateSession(
-        contactUserId:      contact.userId,
+        contactUserId: contact.userId,
         contactPublicKeyB64: contact.publicKeyB64,
-        store:              store,
-        deviceId:           1,
+        store: store,
+        deviceId: 1,
       );
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[ContactEstablishment] Session failed: $e');
       return false;
     }
 
     final encrypted = await _signal.encryptMessage(
-      cipher:   cipher,
+      cipher: cipher,
       plaintext: kContactEstablishmentMessage,
     );
 
     final msgId = _uuid.v4();
     final relay = RelayCoordinator().relay;
     final sent = relay.sendPacket({
+      'type':        'message',
       'id':          msgId,
       'to':          contact.userId,
       'ciphertext':  encrypted['ciphertext'],
@@ -59,7 +63,7 @@ class ContactEstablishmentService {
       'ttl_seconds': AppConfig.defaultTtlSeconds,
     });
 
-    _signal.evictSession(contact.userId);
+    // Keep session cached so opening chat with this contact reuses it
     return sent;
   }
 }

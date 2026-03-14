@@ -4,8 +4,10 @@
 // when first message is received (no notification on add; conversation appears on first message).
 
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
 import '../core/identity/identity_service.dart';
 import '../core/storage/secure_db.dart';
+import '../relay/relay_auth_service.dart';
 import '../models/contact.dart';
 import 'websocket_client.dart';
 
@@ -29,19 +31,55 @@ class RelayCoordinator {
 
   /// Connect relay and install global packet handler. Call once when home screen loads.
   /// Requires non-empty userId (relay server returns "missing uid" otherwise).
+  /// If already connected (e.g. by AppInit), we still set callbacks and _connected so UI and packet delivery work.
   Future<void> connect({required String relayUrl, required String userId}) async {
     if (userId.trim().isEmpty) return;
-    if (_relay.isConnected) return;
+
+    // Always set callbacks first so packets are handled and UI state is correct
     _relay.onPacket = _onPacket;
-    _relay.onConnected = () => _connected = true;
-    _relay.onDisconnected = (_) => _connected = false;
+    _relay.onConnected = () {
+      _connected = true;
+      if (kDebugMode) debugPrint('[RelayCoordinator] onConnected: _connected=true');
+    };
+    _relay.onDisconnected = (reason) {
+      _connected = false;
+      if (kDebugMode) debugPrint('[RelayCoordinator] onDisconnected: $reason');
+    };
+
+    if (_relay.isConnected) {
+      _connected = true;
+      if (kDebugMode) debugPrint('[RelayCoordinator] Already connected, callbacks set');
+      return;
+    }
+
+    // Generate and set authentication handshake
+    try {
+      final identityKeyPair = await _identity.loadIdentityKeyPair();
+      if (identityKeyPair != null) {
+        final authService = RelayAuthService();
+        final handshake = await authService.generateAuthHandshake(
+          userId: userId,
+          identityKeyPair: identityKeyPair,
+        );
+        _relay.setAuthHandshake(handshake);
+        debugPrint('[RelayCoordinator] Set auth handshake');
+      }
+    } catch (e) {
+      debugPrint('[RelayCoordinator] Failed to generate handshake: $e');
+    }
+
     await _relay.connect(relayUrl: relayUrl, userId: userId);
     _connected = _relay.isConnected;
+    if (kDebugMode) debugPrint('[RelayCoordinator] connect done, _connected=$_connected');
   }
 
   void _onPacket(Map<String, dynamic> packet) {
     final from = packet['from'] as String?;
     if (from == null || from.isEmpty) return;
+    if (kDebugMode) {
+      final id = packet['id'] as String?;
+      debugPrint('[RelayCoordinator] Packet received from=${from.length > 8 ? "${from.substring(0, 8)}…" : from} id=${id != null ? "${id.length > 8 ? id.substring(0, 8) : id}…" : "?"}');
+    }
 
     _ensureContactFor(from);
     _buffer.putIfAbsent(from, () => []).add(packet);
@@ -61,7 +99,7 @@ class RelayCoordinator {
         'get_public_key_by_hash',
         params: {'lookup_hash': userId},
       );
-      if (pubKey == null || pubKey is! String || (pubKey as String).isEmpty) return;
+      if (pubKey is! String || pubKey.isEmpty) return;
 
       final fingerprint = await _identity.getFingerprint(pubKey);
       final now = DateTime.now().millisecondsSinceEpoch;

@@ -3,13 +3,18 @@
 // Security-first UX: no email, no password, no cloud sync.
 
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart' as signal;
 import '../../core/identity/identity_service.dart';
+import '../../core/crypto/signal_key_service.dart';
+import '../../core/crypto/prekey_management_service.dart';
+import '../../core/crypto/signal_keys_upload_service.dart';
 import '../../app_config.dart';
 import '../settings/panic_setup_screen.dart';
 
@@ -22,6 +27,7 @@ class OnboardingScreen extends StatefulWidget {
 
 class _OnboardingScreenState extends State<OnboardingScreen> {
   final _identity = IdentityService();
+  final _signalKeyService = SignalKeyService();
   bool   _isGenerating = true;
   String _userId  = '';
   String _pubKeyB64 = '';
@@ -33,24 +39,68 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   }
 
   Future<void> _initialize() async {
-    await _identity.generateIdentityKeyPair();
-    final uid = await _identity.getUserId();
-    final pk  = await _identity.getPublicKeyBase64();
+    try {
+      // Step 1: Generate and store identity keypair
+      await _identity.generateIdentityKeyPair();
+      final uid = await _identity.getUserId();
+      final pk  = await _identity.getPublicKeyBase64();
 
-    // Idempotent registration: upsert public key to Supabase (anon key, no JWT)
-    final registered = await _identity.registerToSupabase(
-      supabaseUrl:     AppConfig.supabaseUrl,
-      supabaseAnonKey: AppConfig.supabaseAnonKey,
-    );
-    if (!registered) {
-      // Non-fatal: allow offline; will retry on next launch via ensureRegistered
+      // Step 2: Initialize Signal Protocol keys in correct order
+      // This generates: identity key, registration ID, signed prekey, signature
+      await _signalKeyService.initializeSignalKeys();
+
+      // Step 3: Generate initial one-time prekeys (50+)
+      final prekeyService = PrekeyManagementService();
+      final initialPreKeys = await prekeyService.generateInitialPreKeys();
+
+      // Step 4: Upload public keys to Supabase
+      final uploadService = SignalKeysUploadService();
+
+      // Get the keys we just generated
+      final identityKeyPair = await _identity.loadIdentityKeyPair();
+      if (identityKeyPair != null) {
+        final regId = Random().nextInt(16384);
+        final signedPreKeyPair = signal.Curve.generateKeyPair();
+        final signedPreKeySig = signal.Curve.calculateSignature(
+          identityKeyPair.getPrivateKey(),
+          signedPreKeyPair.publicKey.serialize(),
+        );
+
+        // Upload identity + signed prekey
+        await uploadService.uploadSignalKeys(
+          userId: uid,
+          identityKeyPair: identityKeyPair,
+          registrationId: regId,
+          signedPreKeyPair: signedPreKeyPair,
+          signedPreKeyId: 1,
+          signedPreKeySignature: signedPreKeySig,
+        );
+
+        // Upload initial prekeys
+        await uploadService.uploadOneTimePreKeys(
+          userId: uid,
+          preKeys: initialPreKeys,
+        );
+      }
+
+      // Step 5: Register identity to Supabase (legacy, for backward compat)
+      final registered = await _identity.registerToSupabase(
+        supabaseUrl: AppConfig.supabaseUrl,
+        supabaseAnonKey: AppConfig.supabaseAnonKey,
+      );
+      if (!registered) {
+        // Non-fatal: allow offline
+      }
+
+      setState(() {
+        _isGenerating = false;
+        _userId = uid;
+        _pubKeyB64 = pk;
+      });
+    } catch (e) {
+      debugPrint('[Onboarding] Init error: $e');
+      setState(() => _isGenerating = false);
     }
-
-    setState(() {
-      _isGenerating = false;
-      _userId       = uid;
-      _pubKeyB64    = pk;
-    });
   }
 
   String get _inviteLink => '${AppConfig.deepLinkScheme}://${AppConfig.deepLinkHost}/$_userId/$_pubKeyB64';

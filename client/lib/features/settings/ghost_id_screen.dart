@@ -7,6 +7,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../core/identity/identity_service.dart';
+import '../../core/crypto/base64_util.dart';
 
 class GhostIdScreen extends StatefulWidget {
   const GhostIdScreen({super.key});
@@ -32,7 +33,7 @@ class _GhostIdScreenState extends State<GhostIdScreen> {
     if (mounted) setState(() { _userId = uid; _pubKeyB64 = pk; });
   }
 
-  String get _inviteLink => 'ghost://add/$_userId/$_pubKeyB64';
+  String get _inviteLink => 'ghost://add/$_userId/${base64Pad(_pubKeyB64)}';
 
   Future<void> _copyId() async {
     if (_userId.isEmpty) return;

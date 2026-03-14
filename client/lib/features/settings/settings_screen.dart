@@ -57,8 +57,53 @@ class _SettingsScreenState extends State<SettingsScreen> {
       }
       return;
     }
-    await _security.setBiometricLockEnabled(val);
-    if (mounted) setState(() => _biometricLock = val);
+
+    // If enabling, trigger biometric authentication immediately
+    if (val) {
+      try {
+        // Add delay to ensure UI is stable before showing biometric prompt
+        // (MIUI cancels biometric if called immediately after camera/navigation)
+        await Future.delayed(const Duration(milliseconds: 300));
+
+        final success = await _security.authenticate(
+          reason: 'Set up biometric lock for Ghost',
+          useErrorDialogs: true,
+        );
+
+        if (mounted) {
+          if (success) {
+            // User authenticated, enable the feature
+            await _security.setBiometricLockEnabled(true);
+            setState(() => _biometricLock = true);
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Biometric lock enabled')),
+            );
+          } else {
+            // Authentication failed or cancelled, don't enable
+            setState(() => _biometricLock = false);
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Biometric authentication cancelled')),
+            );
+          }
+        }
+      } catch (e) {
+        if (mounted) {
+          setState(() => _biometricLock = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error: $e')),
+          );
+        }
+      }
+    } else {
+      // If disabling, just save the preference
+      await _security.setBiometricLockEnabled(false);
+      if (mounted) {
+        setState(() => _biometricLock = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Biometric lock disabled')),
+        );
+      }
+    }
   }
 
   @override
