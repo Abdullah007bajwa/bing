@@ -223,7 +223,7 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() => _messages.add(msg));
       _scrollToBottom();
   } catch (e) {
-      if (kDebugMode) debugPrint('[Chat] Decrypt failed: $e');
+      if (kDebugMode) debugPrint('[Chat] Decrypt failed (session/PreKey/Signal?): $e');
     }
   }
 

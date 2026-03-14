@@ -57,8 +57,15 @@ func (h *Hub) Run(ctx context.Context) {
 			h.mu.Unlock()
 			log.Info().Str("user", c.ID[:8]+"…").Msg("client connected")
 
-			// Deliver any pending offline messages
-			go h.deliverPending(c)
+			// Deliver any pending offline messages (recover so one panic doesn't kill the goroutine)
+			go func(client *Client) {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Error().Interface("panic", r).Msg("deliverPending panic recovered")
+					}
+				}()
+				h.deliverPending(client)
+			}(c)
 
 		case c := <-h.unregister:
 			h.mu.Lock()
@@ -70,7 +77,14 @@ func (h *Hub) Run(ctx context.Context) {
 			log.Info().Str("user", c.ID[:8]+"…").Msg("client disconnected")
 
 		case env := <-h.relay:
-			h.route(env)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Error().Interface("panic", r).Msg("hub route panic recovered")
+					}
+				}()
+				h.route(env)
+			}()
 		}
 	}
 }
@@ -103,6 +117,8 @@ func (h *Hub) route(env model.Envelope) {
 	h.mu.RLock()
 	recipient, online := h.clients[env.Packet.To]
 	h.mu.RUnlock()
+
+	log.Info().Str("to", env.Packet.To).Bool("recipient_online", online).Msg("[Hub] routing")
 
 	if online {
 		// Direct relay — no Redis touch
@@ -170,11 +186,12 @@ func (h *Hub) HandleClient(c *Client) {
 		}
 	}()
 
-	// Read pump
-	c.Conn.SetReadLimit(64 * 1024) // 64KB max packet
-	c.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	// Read pump: 64KB max packet, 5min idle timeout (close connections that don't ping)
+	const idleTimeout = 5 * time.Minute
+	c.Conn.SetReadLimit(64 * 1024)
+	c.Conn.SetReadDeadline(time.Now().Add(idleTimeout))
 	c.Conn.SetPongHandler(func(_ string) error {
-		c.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		c.Conn.SetReadDeadline(time.Now().Add(idleTimeout))
 		return nil
 	})
 
@@ -183,7 +200,7 @@ func (h *Hub) HandleClient(c *Client) {
 		if err != nil {
 			return
 		}
-		c.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		c.Conn.SetReadDeadline(time.Now().Add(idleTimeout))
 
 		var pkt model.Packet
 		if err := json.Unmarshal(raw, &pkt); err != nil {

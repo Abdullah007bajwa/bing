@@ -10,6 +10,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,6 +37,13 @@ func main() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	log.Logger = log.With().Str("svc", "ghost-relay").Logger()
+
+	// GOMAXPROCS: match Render instance CPU (set GOMAXPROCS in env if needed)
+	if v := os.Getenv("GOMAXPROCS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			runtime.GOMAXPROCS(n)
+		}
+	}
 
 	// Load .env file (ignores error if running in production where file doesn't exist)
 	_ = godotenv.Load()
@@ -61,7 +71,7 @@ func main() {
 	// WebSocket upgrade
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		// Extract user_id from query param — no auth token needed (anonymous relay)
-		uid := r.URL.Query().Get("uid")
+		uid := strings.TrimSpace(r.URL.Query().Get("uid"))
 		if uid == "" || len(uid) < 8 {
 			http.Error(w, "missing uid", http.StatusBadRequest)
 			return

@@ -11,6 +11,7 @@ import '../identity/identity_service.dart';
 import '../crypto/signal_key_service.dart';
 import '../crypto/signal_keys_upload_service.dart';
 import '../../relay/relay_auth_service.dart';
+import '../../relay/relay_coordinator.dart';
 import '../../relay/websocket_client.dart';
 import '../../app_config.dart';
 
@@ -216,6 +217,11 @@ class AppInitializationService {
         if (kDebugMode) {
           debugPrint('[AppInit] Successfully connected to relay');
         }
+        // Install app-level packet handler immediately so deliverPending / any inbound packets are not dropped
+        await RelayCoordinator().connect(
+          relayUrl: AppConfig.relayWssUrl,
+          userId:   userId,
+        );
         _updateStep(InitializationStep.complete);
         _isInitialized = true;
         return true;

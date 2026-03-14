@@ -114,7 +114,9 @@ class GhostRelayClient {
         if (kDebugMode) debugPrint('[Relay] RECV from=${from != null && from.length > 6 ? "${from.substring(0, 6)}…" : from}');
       }
       onPacket?.call(packet);
-    } catch (_) {}
+    } catch (e) {
+      if (kDebugMode) debugPrint('[Relay] _onData parse error: $e');
+    }
   }
 
   void _onError(Object error) {
