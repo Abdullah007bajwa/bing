@@ -232,6 +232,18 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _composeController.text.trim();
     if (text.isEmpty || _cipher == null) return;
 
+    // Recipient must be resolved (relay drops packets with empty to)
+    final recipientId = widget.contact.userId.trim();
+    if (recipientId.isEmpty) {
+      if (kDebugMode) debugPrint('[Chat] ERROR: recipient userId is empty, aborting send');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Recipient not set. Open the contact again.')),
+        );
+      }
+      return;
+    }
+
     // Block send until relay is connected and authenticated
     if (!_relay.isConnected) {
       if (mounted) {
@@ -282,12 +294,17 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _messages.add(msg));
     _scrollToBottom();
 
+    final ciphertext = encrypted['ciphertext'] as String?;
+    if (ciphertext == null || ciphertext.isEmpty) {
+      if (kDebugMode) debugPrint('[Chat] ERROR: ciphertext empty after encrypt, aborting send');
+      return;
+    }
     final packet = {
       'type':        'message',
       'id':          msgId,
-      'to':          widget.contact.userId,
+      'to':          recipientId,
       'from':        _myUserId,
-      'ciphertext':  encrypted['ciphertext'],
+      'ciphertext':  ciphertext,
       'msg_type':    encrypted['type'] == 1 ? 'prekey' : 'signal',
       'ttl_seconds': _ttlSeconds,
       'timestamp':   now,

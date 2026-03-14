@@ -133,6 +133,7 @@ class GhostRelayClient {
 
   // ── Send encrypted packet ─────────────────────────────────────────────────
   /// Sends only when channel is connected. Logs in debug. Returns false if not connected or on error.
+  /// Relay requires non-empty "to" and "id"; packets with empty to/id are rejected server-side.
   bool sendPacket(Map<String, dynamic> packet) {
     if (_channel == null) {
       if (kDebugMode) debugPrint('[Relay] sendPacket: not connected');
@@ -142,14 +143,19 @@ class GhostRelayClient {
       if (kDebugMode) debugPrint('[Relay] sendPacket: not authenticated');
       return false;
     }
+    final to = packet['to'] as String?;
+    final id = packet['id'] as String?;
+    if (to == null || to.trim().isEmpty || id == null || id.toString().trim().isEmpty) {
+      if (kDebugMode) debugPrint('[Relay] sendPacket: empty to or id, rejected');
+      return false;
+    }
     try {
       final json = jsonEncode(packet);
       _channel!.sink.add(json);
       if (kDebugMode) {
-        final to = packet['to'] as String?;
-        final id = packet['id'] as String?;
         final hasCipher = packet['ciphertext'] != null && (packet['ciphertext'] as String).isNotEmpty;
-        debugPrint('[Relay] SENT to=${to != null && to.length > 6 ? "${to.substring(0, 6)}…" : to} id=${id != null && id.length > 8 ? "${id.substring(0, 8)}…" : id} hasCipher=$hasCipher');
+        final idStr = id.toString();
+        debugPrint('[Relay] SENT to=${to.length > 6 ? "${to.substring(0, 6)}…" : to} id=${idStr.length > 8 ? "${idStr.substring(0, 8)}…" : idStr} hasCipher=$hasCipher');
       }
       return true;
     } catch (e) {

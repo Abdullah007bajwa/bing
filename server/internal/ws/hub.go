@@ -211,7 +211,13 @@ func (h *Hub) HandleClient(c *Client) {
 			continue
 		}
 
-		// Basic validation
+		// Skip control/auth frames (client sends uid+timestamp+signature first; no to/id)
+		if pkt.To == "" && pkt.ID == "" {
+			log.Debug().Str("user", c.ID[:min(8, len(c.ID))]+"…").Msg("control/auth frame, skipping")
+			continue
+		}
+
+		// Basic validation — relay packets must have to and id
 		if pkt.To == "" || pkt.ID == "" {
 			log.Warn().Str("user", c.ID[:min(8, len(c.ID))]+"…").Str("to", pkt.To).Str("id", pkt.ID).Msg("packet dropped: empty to or id")
 			continue
