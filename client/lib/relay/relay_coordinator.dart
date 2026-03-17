@@ -29,22 +29,22 @@ class RelayCoordinator {
 
   bool get isConnected => _connected;
 
-  /// Connect relay and install global packet handler. Call once when home screen loads.
-  /// Requires non-empty userId (relay server returns "missing uid" otherwise).
-  /// If already connected (e.g. by AppInit), we still set callbacks and _connected so UI and packet delivery work.
+  /// Connect relay and install global packet handler. Call once at app startup.
+  /// onPacket must be set before connect() so deliverPending packets are not dropped.
   Future<void> connect({required String relayUrl, required String userId}) async {
     if (userId.trim().isEmpty) return;
 
-    _relay.onPacket = _onPacket;
     _relay.onConnected = () => _connected = true;
     _relay.onDisconnected = (_) => _connected = false;
+
+    // Wire the global packet handler before connect so deliverPending and all incoming messages are handled
+    _relay.onPacket = _onPacket;
 
     if (_relay.isConnected) {
       _connected = true;
       return;
     }
 
-    // Generate and set authentication handshake
     try {
       final identityKeyPair = await _identity.loadIdentityKeyPair();
       if (identityKeyPair != null) {
@@ -54,7 +54,6 @@ class RelayCoordinator {
           identityKeyPair: identityKeyPair,
         );
         _relay.setAuthHandshake(handshake);
-        debugPrint('[RelayCoordinator] Set auth handshake');
       }
     } catch (e) {
       debugPrint('[RelayCoordinator] Failed to generate handshake: $e');

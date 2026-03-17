@@ -8,6 +8,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,11 @@ type Client struct {
 	Conn *websocket.Conn
 	Send chan []byte
 	Hub  *Hub
+	// Authed is set only after a valid signed handshake is verified.
+	// Until Authed, the server will not relay packets nor deliver pending.
+	Authed bool
+	// pendingDelivered ensures we only trigger deliverPending once per connection.
+	pendingDelivered bool
 }
 
 // Hub manages all client connections and message routing.
@@ -56,16 +62,6 @@ func (h *Hub) Run(ctx context.Context) {
 			h.clients[c.ID] = c
 			h.mu.Unlock()
 			log.Info().Str("user", c.ID[:8]+"…").Msg("client connected")
-
-			// Deliver any pending offline messages (recover so one panic doesn't kill the goroutine)
-			go func(client *Client) {
-				defer func() {
-					if r := recover(); r != nil {
-						log.Error().Interface("panic", r).Msg("deliverPending panic recovered")
-					}
-				}()
-				h.deliverPending(client)
-			}(c)
 
 		case c := <-h.unregister:
 			h.mu.Lock()
@@ -205,15 +201,57 @@ func (h *Hub) HandleClient(c *Client) {
 		// Log that we received a frame (size only — never content)
 		log.Debug().Str("user", c.ID[:min(8, len(c.ID))]+"…").Int("size", len(raw)).Msg("ws message received")
 
+		// Auth handshake: {"uid":"...","timestamp":"...","signature":"..."}.
+		// Verified against Supabase public key registry; sends {"type":"auth_ok","auth":true} on success.
+		// Until authenticated, we do not accept or relay any packets.
+		if !c.Authed {
+			var hs AuthHandshake
+			if err := json.Unmarshal(raw, &hs); err == nil && hs.UID != "" && hs.Timestamp != "" && hs.Signature != "" {
+				uid := strings.TrimSpace(hs.UID)
+				if uid != c.ID {
+					log.Warn().Str("user", c.ID[:8]+"…").Msg("auth failed: uid mismatch")
+					_ = c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
+					return
+				}
+				ok, reason := VerifyAuthHandshake(context.Background(), uid, hs.Timestamp, hs.Signature)
+				if !ok {
+					log.Warn().Str("user", c.ID[:8]+"…").Str("reason", reason).Msg("auth failed")
+					_ = c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
+					return
+				}
+
+				c.Authed = true
+				log.Info().Str("user", c.ID[:8]+"…").Msg("auth ok")
+
+				ack, _ := json.Marshal(map[string]any{"type": "auth_ok", "auth": true})
+				select {
+				case c.Send <- ack:
+				default:
+				}
+
+				// Deliver pending only after auth success.
+				if !c.pendingDelivered {
+					c.pendingDelivered = true
+					go func(client *Client) {
+						defer func() {
+							if r := recover(); r != nil {
+								log.Error().Interface("panic", r).Msg("deliverPending panic recovered")
+							}
+						}()
+						h.deliverPending(client)
+					}(c)
+				}
+				continue
+			}
+
+			log.Warn().Str("user", c.ID[:8]+"…").Msg("unauthenticated frame dropped")
+			_ = c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
+			return
+		}
+
 		var pkt model.Packet
 		if err := json.Unmarshal(raw, &pkt); err != nil {
 			log.Warn().Str("user", c.ID[:min(8, len(c.ID))]+"…").Err(err).Msg("packet dropped: malformed json")
-			continue
-		}
-
-		// Skip control/auth frames (client sends uid+timestamp+signature first; no to/id)
-		if pkt.To == "" && pkt.ID == "" {
-			log.Debug().Str("user", c.ID[:min(8, len(c.ID))]+"…").Msg("control/auth frame, skipping")
 			continue
 		}
 

@@ -1,6 +1,7 @@
 // lib/core/crypto/signal_session.dart
 // Signal Protocol Double Ratchet session management.
 // Every send/receive ratchets forward — forward secrecy guaranteed.
+// Session state is persisted to SQLCipher so ratchet state survives navigation.
 
 import 'dart:convert';
 import 'dart:typed_data';
@@ -8,11 +9,14 @@ import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 import 'base64_util.dart';
 import 'signal_session_builder.dart';
 import 'signal_keys_upload_service.dart';
+import '../storage/secure_db.dart';
 
 class SignalSessionService {
   static final SignalSessionService _instance = SignalSessionService._();
   factory SignalSessionService() => _instance;
   SignalSessionService._();
+
+  final SecureDb _db = SecureDb();
 
   // In-memory session cache keyed by userId
   final Map<String, SessionCipher> _sessionCache = {};
@@ -59,17 +63,37 @@ class SignalSessionService {
 
     final cipher = SessionCipher.fromStore(store, remoteAddress);
     _sessionCache[contactUserId] = cipher;
+    await _persistSession(store, contactUserId, deviceId);
     return cipher;
+  }
+
+  /// Persist session state to SQLCipher so it survives screen close/reopen.
+  Future<void> _persistSession(InMemorySignalProtocolStore store, String contactUserId, int deviceId) async {
+    try {
+      final address = SignalProtocolAddress(contactUserId, deviceId);
+      final record = await store.loadSession(address);
+      if (record == null) return;
+      final b64 = base64Encode(record.serialize());
+      await _db.storeSessionState('$contactUserId.$deviceId', b64);
+    } catch (_) {
+      // No session or serialize failed — ignore
+    }
   }
 
   // ── Encrypt a plaintext message ───────────────────────────────────────────
   Future<Map<String, dynamic>> encryptMessage({
     required SessionCipher cipher,
     required String plaintext,
+    InMemorySignalProtocolStore? store,
+    String? contactUserId,
+    int deviceId = 1,
   }) async {
     final ciphertext = await cipher.encrypt(Uint8List.fromList(
       utf8.encode(plaintext),
     ));
+    if (store != null && contactUserId != null) {
+      await _persistSession(store, contactUserId, deviceId);
+    }
     return {
       'type':       ciphertext.getType(),            // 1=PreKey, 2=Signal
       'ciphertext': base64Encode(ciphertext.serialize()),
@@ -80,6 +104,9 @@ class SignalSessionService {
   Future<String> decryptMessage({
     required SessionCipher cipher,
     required Map<String, dynamic> packet,
+    InMemorySignalProtocolStore? store,
+    String? contactUserId,
+    int deviceId = 1,
   }) async {
     final ciphertextBytes = safeBase64Decode(packet['ciphertext'] as String);
     final type            = packet['type'] as int;
@@ -94,6 +121,9 @@ class SignalSessionService {
     } else {
       final signalMsg = SignalMessage.fromSerialized(ciphertextBytes);
       plaintext = await cipher.decryptFromSignal(signalMsg);
+    }
+    if (store != null && contactUserId != null) {
+      await _persistSession(store, contactUserId, deviceId);
     }
     return utf8.decode(plaintext);
   }

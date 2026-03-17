@@ -23,6 +23,12 @@ class GhostRelayClient {
   Timer? _reconnectTimer;
   bool _disposed = false;
 
+  /// Broadcast stream of incoming packets. Subscribe once (e.g. in coordinator) for app lifetime.
+  /// Never cancelled by navigation; only closed on disconnect().
+  final StreamController<Map<String, dynamic>> _incomingController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  Stream<Map<String, dynamic>> get incomingPackets => _incomingController.stream;
+
   int _reconnectAttempts = 0;
   static const int _maxReconnectDelay = 30; // seconds
 
@@ -102,8 +108,11 @@ class GhostRelayClient {
   }
 
   void _onData(dynamic raw) {
+    // Log every received frame so we know the stream is alive (length only — never content)
+    final rawStr = raw is String ? raw : raw?.toString() ?? '';
+    if (kDebugMode) debugPrint('[Relay] RECEIVED len=${rawStr.length}');
     try {
-      final packet = jsonDecode(raw as String) as Map<String, dynamic>;
+      final packet = jsonDecode(rawStr) as Map<String, dynamic>;
       final authOk = packet['type'] == 'auth_ok' || packet['auth'] == true;
       if (authOk) {
         _authenticated = true;
@@ -113,6 +122,7 @@ class GhostRelayClient {
         final from = packet['from'] as String?;
         if (kDebugMode) debugPrint('[Relay] RECV from=${from != null && from.length > 6 ? "${from.substring(0, 6)}…" : from}');
       }
+      _incomingController.add(packet);
       onPacket?.call(packet);
     } catch (e) {
       if (kDebugMode) debugPrint('[Relay] _onData parse error: $e');

@@ -13,6 +13,7 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 import 'package:uuid/uuid.dart';
 import '../../core/crypto/signal_session.dart';
+import '../../core/crypto/base64_util.dart';
 import '../../core/storage/secure_db.dart';
 import '../../core/storage/ephemeral_cache.dart';
 import '../../core/identity/identity_service.dart';
@@ -65,8 +66,20 @@ class _ChatScreenState extends State<ChatScreen> {
     _myUserId = await _identity.getUserId();
     if (kp == null || !mounted) return;
 
-    // Initialize Signal store  
+    // Initialize Signal store (in-memory; session record loaded from SQLCipher below)
     _signalStore = InMemorySignalProtocolStore(kp, 1);
+
+    // Load persisted session so ratchet state survives navigation (Bug 2 fix)
+    final address = SignalProtocolAddress(widget.contact.userId, 1);
+    final sessionB64 = await _db.loadSessionState('${widget.contact.userId}.1');
+    if (sessionB64 != null && sessionB64.isNotEmpty) {
+      try {
+        final record = SessionRecord.fromSerialized(safeBase64Decode(sessionB64));
+        await _signalStore.storeSession(address, record);
+      } catch (_) {
+        // Stale or corrupt session — will build new session below
+      }
+    }
 
     // Init session with contact
     try {
@@ -94,7 +107,13 @@ class _ChatScreenState extends State<ChatScreen> {
       try {
         final typeInt = msg.msgType == MessageType.preKey ? 3 : 2;
         final normalized = {'type': typeInt, 'ciphertext': msg.ciphertext, 'ttl_seconds': msg.ttlSeconds};
-        final plaintext = await _signal.decryptMessage(cipher: _cipher!, packet: normalized);
+        final plaintext = await _signal.decryptMessage(
+          cipher: _cipher!,
+          packet: normalized,
+          store: _signalStore,
+          contactUserId: widget.contact.userId,
+          deviceId: 1,
+        );
         _cache.cacheMessage(msg.id, plaintext, ttl: Duration(seconds: msg.ttlSeconds > 0 ? msg.ttlSeconds : 3600));
       } catch (_) { /* skip undecryptable or wrong session */ }
     }
@@ -108,7 +127,13 @@ class _ChatScreenState extends State<ChatScreen> {
         final msgType = packet['msg_type'];
         final typeInt = msgType == 'prekey' ? 3 : 2;
         final normalized = Map<String, dynamic>.from(packet)..['type'] = typeInt;
-        final plaintext = await _signal.decryptMessage(cipher: _cipher!, packet: normalized);
+        final plaintext = await _signal.decryptMessage(
+          cipher: _cipher!,
+          packet: normalized,
+          store: _signalStore,
+          contactUserId: widget.contact.userId,
+          deviceId: 1,
+        );
         final now = DateTime.now().millisecondsSinceEpoch;
         final msg = GhostMessage(
           id:             _uuid.v4(),
@@ -181,7 +206,13 @@ class _ChatScreenState extends State<ChatScreen> {
       final typeInt = (msgType == 'prekey' || msgType == 0) ? 3 : 2;
       final normalized = Map<String, dynamic>.from(packet)..['type'] = typeInt;
 
-      final plaintext = await _signal.decryptMessage(cipher: _cipher!, packet: normalized);
+      final plaintext = await _signal.decryptMessage(
+        cipher: _cipher!,
+        packet: normalized,
+        store: _signalStore,
+        contactUserId: widget.contact.userId,
+        deviceId: 1,
+      );
       final now       = DateTime.now().millisecondsSinceEpoch;
       final incomingId = (packet['id'] as String?)?.trim();
       final msg       = GhostMessage(
@@ -259,7 +290,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
     Map<String, dynamic> encrypted;
     try {
-      encrypted = await _signal.encryptMessage(cipher: _cipher!, plaintext: text);
+      encrypted = await _signal.encryptMessage(
+        cipher: _cipher!,
+        plaintext: text,
+        store: _signalStore,
+        contactUserId: widget.contact.userId,
+        deviceId: 1,
+      );
     } catch (e) {
       if (kDebugMode) debugPrint('[Chat] Encrypt failed: $e');
       if (mounted) {
