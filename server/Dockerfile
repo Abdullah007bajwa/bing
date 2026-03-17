@@ -1,7 +1,7 @@
 # Ghost Relay — Multi-stage Docker build
 # Final image: distroless/static — no shell, no package manager, minimal attack surface
 
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
