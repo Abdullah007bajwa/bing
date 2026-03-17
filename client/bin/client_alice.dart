@@ -56,7 +56,7 @@ Future<void> main() async {
     // Send msg1
     const msg1 = 'Hello Bob 🔐 — message 1';
     final enc1 = await encryptAsync(cipher: cipher, plaintext: msg1);
-    logLine(name, '[ENCRYPT] plaintext->ciphertext_len=${(enc1['ciphertext'] as String).length} msg_type=${enc1['type'] == 1 ? "prekey" : "signal"}');
+    logLine(name, '[ENCRYPT] plaintext->ciphertext_len=${(enc1['ciphertext'] as String).length} msg_type=${enc1['type'] == 3 ? "prekey" : "signal"}');
 
     final id1 = newMsgId();
     final pkt1 = {
@@ -65,7 +65,7 @@ Future<void> main() async {
       'to': bobUid,
       'id': id1,
       'ciphertext': enc1['ciphertext'],
-      'msg_type': enc1['type'] == 1 ? 'prekey' : 'signal',
+      'msg_type': enc1['type'] == 3 ? 'prekey' : 'signal',
       'ttl_seconds': 3600,
       'timestamp': DateTime.now().millisecondsSinceEpoch,
     };
@@ -92,7 +92,7 @@ Future<void> main() async {
       'to': bobUid,
       'id': id2,
       'ciphertext': enc2['ciphertext'],
-      'msg_type': enc2['type'] == 1 ? 'prekey' : 'signal',
+      'msg_type': enc2['type'] == 3 ? 'prekey' : 'signal',
       'ttl_seconds': 3600,
       'timestamp': DateTime.now().millisecondsSinceEpoch,
     };

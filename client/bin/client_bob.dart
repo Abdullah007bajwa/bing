@@ -17,6 +17,10 @@ Future<void> main() async {
 
     final identityKeyB64 = base64Encode(me.keyPair.getPublicKey().publicKey.serialize());
 
+    // Local libsignal store must retain our private signed-prekey + one-time prekeys
+    // so we can decrypt the first PreKeySignalMessage.
+    final store = InMemorySignalProtocolStore(me.keyPair, me.registrationId);
+
     logLine(name, '[SUPABASE] uploading identity + prekeys');
     await supa.upsertUser(userId: me.userId, identityKeyB64: identityKeyB64, registrationId: me.registrationId);
 
@@ -28,12 +32,16 @@ Future<void> main() async {
       publicKeyB64: base64Encode(spk.getKeyPair().publicKey.serialize()),
       signatureB64: base64Encode(spk.signature),
     );
+    store.storeSignedPreKey(spkId, spk);
 
     final prekeys = KeyHelper.generatePreKeys(1, 10);
     await supa.insertPreKeys(
       userId: me.userId,
       preKeys: prekeys.map((p) => MapEntry(p.id, p.getKeyPair())).toList(),
     );
+    for (final pk in prekeys) {
+      store.storePreKey(pk.id, pk);
+    }
     logLine(name, '[SUPABASE] upload ok');
 
     await writeState({
@@ -62,7 +70,6 @@ Future<void> main() async {
     logLine(name, '[RELAY] received id=${msgId.isNotEmpty ? msgId.substring(0, 8) : "?"}… from=${from.substring(0, 8)}… msg_type=$msgType');
 
     // Build a cipher bound to Alice; PreKey decrypt will establish the session on first message.
-    final store = InMemorySignalProtocolStore(me.keyPair, me.registrationId);
     final addr = SignalProtocolAddress(from, 1);
     final cipher = SessionCipher.fromStore(store, addr);
 
@@ -79,7 +86,7 @@ Future<void> main() async {
       'to': from,
       'id': replyId,
       'ciphertext': enc['ciphertext'],
-      'msg_type': enc['type'] == 1 ? 'prekey' : 'signal',
+      'msg_type': enc['type'] == 3 ? 'prekey' : 'signal',
       'ttl_seconds': 3600,
       'timestamp': DateTime.now().millisecondsSinceEpoch,
     };
@@ -90,7 +97,6 @@ Future<void> main() async {
     logLine(name, '[CLIENT] waiting for Alice message 2 (ratchet)');
     final secondMsg = await conn.incoming.stream
         .where((p) => (p['from'] as String?) == from && p.containsKey('ciphertext'))
-        .skip(1)
         .first
         .timeout(const Duration(seconds: 20));
 

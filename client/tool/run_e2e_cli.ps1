@@ -29,11 +29,13 @@ try {
   $alice = Start-Process -FilePath "dart" -ArgumentList @("run", "bin/client_alice.dart") -NoNewWindow -PassThru -RedirectStandardOutput "tool\alice.log" -RedirectStandardError "tool\alice.err.log"
 
   Info "Waiting for Alice to finish..."
-  $alice.WaitForExit()
+  Wait-Process -Id $alice.Id
+  $alice.Refresh()
   $aliceExit = $alice.ExitCode
 
   Info "Waiting for Bob to finish..."
-  $bob.WaitForExit()
+  Wait-Process -Id $bob.Id
+  $bob.Refresh()
   $bobExit = $bob.ExitCode
 
   Info "Alice exit=$aliceExit, Bob exit=$bobExit"
@@ -42,7 +44,7 @@ try {
   Info "  tool\alice.log / tool\alice.err.log"
   Info "  tool\bob.log   / tool\bob.err.log"
 
-  if ($aliceExit -ne 0 -or $bobExit -ne 0) {
+  if (($aliceExit -ne 0) -or ($bobExit -ne 0)) {
     throw "E2E failed (alice=$aliceExit, bob=$bobExit). See logs under client\tool\."
   }
 

@@ -108,31 +108,30 @@ func (s *Store) CheckReplay(ctx context.Context, packetID string, ttl time.Durat
 func (s *Store) AllowRateLimit(ctx context.Context, userID string, capacity int, ratePerMin int) (bool, error) {
 	// Simple rate limiter script (token bucket)
 	script := `
-		var key = KEYS[1]
-		var capacity = tonumber(ARGV[1])
-		var rate = tonumber(ARGV[2])
-		var now = tonumber(ARGV[3])
-		
-		var info = redis.call("HMGET", key, "tokens", "last_update")
-		var tokens = tonumber(info[1])
-		var last_update = tonumber(info[2])
-		
-		if not tokens then
+		local key = KEYS[1]
+		local capacity = tonumber(ARGV[1])
+		local rate = tonumber(ARGV[2])
+		local now = tonumber(ARGV[3])
+
+		local info = redis.call("HMGET", key, "tokens", "last_update")
+		local tokens = tonumber(info[1])
+		local last_update = tonumber(info[2])
+
+		if tokens == nil or last_update == nil then
 			tokens = capacity
 			last_update = now
 		end
-		
+
 		-- replenish tokens based on time passed
 		local delta_min = (now - last_update) / 60.0
 		tokens = math.min(capacity, tokens + (delta_min * rate))
-		
+
 		if tokens >= 1 then
 			redis.call("HMSET", key, "tokens", tokens - 1, "last_update", now)
 			redis.call("EXPIRE", key, 3600) -- expire bucket after 1h inactivity
 			return 1
-		else
-			return 0
 		end
+		return 0
 	`
 	
 	now := time.Now().Unix()

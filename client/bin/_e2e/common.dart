@@ -394,7 +394,9 @@ Future<Map<String, dynamic>> encryptAsync({
 }) async {
   final ct = await cipher.encrypt(Uint8List.fromList(utf8.encode(plaintext)));
   return {
-    'type': ct.getType(), // 1=PreKey, 2=Signal
+    // libsignal_protocol_dart uses CiphertextMessage types:
+    // 3 = PREKEY_TYPE, 2 = WHISPER_TYPE (SignalMessage)
+    'type': ct.getType(),
     'ciphertext': base64Encode(ct.serialize()),
   };
 }
