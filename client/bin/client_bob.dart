@@ -55,14 +55,18 @@ Future<void> main() async {
       uid: me.userId,
       identityKeyPair: me.keyPair,
     );
+    final early = conn.detachPreRecvBufferAndStopBuffering();
 
     logLine(name, '[CLIENT] waiting for Alice message');
 
     Map<String, dynamic> firstMsg;
-    firstMsg = await conn.incoming.stream
-        .where((p) => p.containsKey('ciphertext') && (p['from'] as String?)?.isNotEmpty == true)
-        .first
-        .timeout(const Duration(seconds: 20));
+    firstMsg = firstCiphertextFromAny(early) ??
+        await conn.incoming.stream
+            .where((p) =>
+                p.containsKey('ciphertext') &&
+                (p['from'] as String?)?.isNotEmpty == true)
+            .first
+            .timeout(const Duration(seconds: 20));
 
     final from = firstMsg['from'] as String;
     final msgId = (firstMsg['id'] as String?) ?? '';

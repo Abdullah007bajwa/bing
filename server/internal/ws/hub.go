@@ -265,6 +265,8 @@ func (h *Hub) HandleClient(c *Client) {
 				log.Warn().Str("user", c.ID[:min(8, len(c.ID))]+"…").Msg("packet dropped: receipt missing receipt/msg_id")
 				continue
 			}
+		} else if pkt.Type == "session_reset" || pkt.MsgType == "session_reset" {
+			// Control packet: no Signal ciphertext; clients branch on msg_type before decrypt.
 		} else {
 			// Standard encrypted message packet
 			if pkt.Ciphertext == "" {

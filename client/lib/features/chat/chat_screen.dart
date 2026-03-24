@@ -14,8 +14,6 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 import 'package:uuid/uuid.dart';
 import '../../core/crypto/signal_session.dart';
-import '../../core/crypto/signal_session_builder.dart';
-import '../../core/crypto/signal_keys_upload_service.dart';
 import '../../core/crypto/decrypt_failure.dart';
 import '../../core/crypto/base64_util.dart';
 import '../../core/storage/secure_db.dart';
@@ -38,6 +36,8 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   static const int _maxDecryptAttempts = 50;
+  static const int _autoRepairAfterDecryptAttempts = 3;
+  static const int _autoRepairCooldownMs = 15000;
 
   final _composeController = TextEditingController();
   final _scrollController  = ScrollController();
@@ -61,6 +61,9 @@ class _ChatScreenState extends State<ChatScreen> {
   String _myUserId = '';
   bool   _ephemeralEnabled = true;
   int    _ttlSeconds       = AppConfig.defaultTtlSeconds;
+
+  /// Throttle decrypt-triggered repairs (send-path repair sets this too).
+  final Map<String, int> _lastSessionAutoRepairMs = {};
 
   @override
   void initState() {
@@ -88,14 +91,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (sessionB64 != null && sessionB64.isNotEmpty) {
       try {
         final record = SessionRecord.fromSerialized(safeBase64Decode(sessionB64));
-        // Only restore if the session is established (has a valid sender ratchet key).
-        // A fresh/empty session would cause AssertionError(InvalidKeyException) on encrypt.
-        if (record.sessionState.hasSenderChain()) {
-          await _signalStore.storeSession(address, record);
-        } else {
-          // Stale empty session — clear it so JIT build creates a clean one
-          await _db.storeSessionState('${widget.contact.userId}.1', '');
-        }
+        // Restore whatever ratchet state exists (sender-only, receiver-only, or both).
+        // Encrypt can self-heal if sender state is missing.
+        await _signalStore.storeSession(address, record);
       } catch (_) {
         // Stale or corrupt session — will build new session below
       }
@@ -218,6 +216,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _packetIsSessionReset(Map<String, dynamic> packet) {
     final mt = packet['msg_type'];
     if (mt is String && mt == 'session_reset') return true;
+    if ('$mt' == 'session_reset') return true;
     return packet['type'] == 'session_reset';
   }
 
@@ -235,6 +234,59 @@ class _ChatScreenState extends State<ChatScreen> {
         _messages = List<GhostMessage>.from(_messages)..[idx] = gm;
       }
     });
+  }
+
+  bool _sessionAutoRepairOnCooldown(String peerId) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final last = _lastSessionAutoRepairMs[peerId] ?? 0;
+    return now - last < _autoRepairCooldownMs;
+  }
+
+  /// Notify peer, clear local ratchet, drop undecryptable backlog, refresh cipher.
+  /// Matches production messengers: bilateral reset without manual key/session files.
+  Future<void> _autoRepairSessionWithPeer() async {
+    final peer = widget.contact.userId.trim();
+    if (peer.isEmpty || !mounted) return;
+
+    _lastSessionAutoRepairMs[peer] =
+        DateTime.now().millisecondsSinceEpoch;
+
+    _coordinator.sendSessionResetIfAllowed(
+      fromUserId: _myUserId,
+      toUserId: peer,
+    );
+    await _signal.clearSessionForPeer(
+      store: _signalStore,
+      contactUserId: peer,
+    );
+    _signal.evictSession(peer);
+    await _db.abandonPendingDecryptsForConversation(peer, _myUserId);
+    _cipher = await _signal.getOrCreateSession(
+      contactUserId: peer,
+      contactPublicKeyB64: widget.contact.publicKeyB64,
+      store: _signalStore,
+      deviceId: 1,
+    );
+    if (kDebugMode) {
+      debugPrint(
+        '[Chat] Session auto-repair: session_reset sent, local state cleared, '
+        'stale decrypt queue abandoned',
+      );
+    }
+    if (mounted) {
+      setState(() {
+        _messages = _messages
+            .map((m) {
+              if (m.senderId == _myUserId || m.decryptPending != 1) return m;
+              return m.copyWith(
+                decryptPending: 0,
+                decryptPermanentFail: 1,
+                lastDecryptError: 'session_auto_reset',
+              );
+            })
+            .toList();
+      });
+    }
   }
 
   /// Drain pending decrypts in DB order; one success may unlock the next ratchet step.
@@ -339,6 +391,24 @@ class _ChatScreenState extends State<ChatScreen> {
         decryptPermanentFail: perm,
       );
       await _mergeMessageFromDb(msg.id);
+
+      final peer = widget.contact.userId.trim();
+      final shouldRepair = perm == 0 &&
+          nextAttempts >= _autoRepairAfterDecryptAttempts &&
+          (e.failureType == DecryptFailureType.badMac ||
+              e.failureType == DecryptFailureType.staleSession) &&
+          peer.isNotEmpty &&
+          !_sessionAutoRepairOnCooldown(peer);
+      if (shouldRepair) {
+        if (kDebugMode) {
+          debugPrint(
+            '[Chat] Repeated decrypt failure (${e.failureType.name}) — '
+            'running bilateral auto-repair',
+          );
+        }
+        await _autoRepairSessionWithPeer();
+        await _drainPendingDecrypts();
+      }
       return false;
     } catch (e) {
       await _db.updateMessageDecryptState(
@@ -356,17 +426,12 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _handlePeerSessionReset() async {
     if (_cipher == null || !mounted) return;
     try {
+      // Peer cleared their send session; we must drop our receive state for them.
+      // Do NOT run outbound X3DH here — that consumes their prekey and builds the wrong
+      // ratchet for decrypting *their* next PreKey. Wait for their next establishing message.
       await _signal.clearSessionForPeer(
         store: _signalStore,
         contactUserId: widget.contact.userId,
-      );
-      final builder = SignalSessionBuilder(
-        store: _signalStore,
-        keysService: SignalKeysUploadService(),
-      );
-      await builder.buildSession(
-        recipientUserId: widget.contact.userId,
-        deviceId: 1,
       );
       _cipher = await _signal.getOrCreateSession(
         contactUserId: widget.contact.userId,
@@ -495,12 +560,34 @@ class _ChatScreenState extends State<ChatScreen> {
           );
         },
       );
-      _cipher = await _signal.getOrCreateSession(
-        contactUserId: widget.contact.userId,
-        contactPublicKeyB64: widget.contact.publicKeyB64,
-        store: _signalStore,
-        deviceId: 1,
-      );
+    } on SessionDesyncException catch (e) {
+      if (kDebugMode) {
+        debugPrint('[Chat] Session desync on send — auto-repair then retry: $e');
+      }
+      await _autoRepairSessionWithPeer();
+      try {
+        encrypted = await _signal.encryptMessage(
+          cipher: _cipher!,
+          plaintext: text,
+          store: _signalStore,
+          contactUserId: widget.contact.userId,
+          deviceId: 1,
+          onBeforeSessionRebuild: () {
+            _coordinator.sendSessionResetIfAllowed(
+              fromUserId: _myUserId,
+              toUserId: widget.contact.userId,
+            );
+          },
+        );
+      } catch (e2) {
+        if (kDebugMode) debugPrint('[Chat] Encrypt failed after auto-repair: $e2');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Encryption failed: $e2')),
+          );
+        }
+        return;
+      }
     } catch (e) {
       if (kDebugMode) debugPrint('[Chat] Encrypt failed: $e');
       if (mounted) {
@@ -510,6 +597,13 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       return;
     }
+
+    _cipher = await _signal.getOrCreateSession(
+      contactUserId: widget.contact.userId,
+      contactPublicKeyB64: widget.contact.publicKeyB64,
+      store: _signalStore,
+      deviceId: 1,
+    );
     final now       = DateTime.now().millisecondsSinceEpoch;
     final msgId     = _uuid.v4();
 

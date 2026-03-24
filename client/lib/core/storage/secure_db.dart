@@ -293,6 +293,28 @@ class SecureDb {
     );
   }
 
+  /// After a crypto session auto-reset, ciphertext queued under the old ratchet
+  /// will never decrypt — stop retrying and surface as permanent (like WhatsApp
+  /// "waiting for this message" timeout behavior).
+  Future<int> abandonPendingDecryptsForConversation(
+    String conversationId,
+    String myUserId, {
+    String error = 'session_auto_reset',
+  }) async {
+    final d = await db;
+    return d.update(
+      'messages',
+      {
+        'decrypt_pending': 0,
+        'decrypt_permanent_fail': 1,
+        'last_decrypt_error': error,
+      },
+      where:
+          'conversation_id = ? AND sender_id != ? AND decrypt_pending = 1',
+      whereArgs: [conversationId, myUserId],
+    );
+  }
+
   /// True if any conversation still has pending decrypt work.
   Future<bool> hasAnyPendingDecrypt(String myUserId) async {
     final d = await db;

@@ -48,6 +48,7 @@ Future<void> main() async {
       uid: me.userId,
       identityKeyPair: me.keyPair,
     );
+    conn.detachPreRecvBufferAndStopBuffering();
 
     // Build outbound session to Bob using Bob's published keys
     final built = await buildSession(name: name, me: me, supa: supa, contactUserId: bobUid);

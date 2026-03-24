@@ -262,20 +262,177 @@ class SupabaseRest {
   }
 }
 
+// ── CLI local Signal keystore (signed prekey + one-time prekeys) ────────────
+// Inbound PreKeySignalMessages require the recipient's *private* signed prekey
+// in [InMemorySignalProtocolStore]. Supabase only holds public material.
+
+File cliSignalKeysFile(String userId) => File(
+      '${Directory.current.path}${Platform.pathSeparator}tool${Platform.pathSeparator}signal_local_keys_$userId.json',
+    );
+
+Future<void> persistCliSignalKeysFile({
+  required String userId,
+  required SignedPreKeyRecord signedPreKey,
+  required List<PreKeyRecord> preKeys,
+}) async {
+  final f = cliSignalKeysFile(userId);
+  await f.parent.create(recursive: true);
+  await f.writeAsString(jsonEncode({
+    'signed_prekey_record_b64': base64Encode(signedPreKey.serialize()),
+    'prekeys': preKeys
+        .map((p) => {'id': p.id, 'record_b64': base64Encode(p.serialize())})
+        .toList(),
+  }));
+}
+
+/// Loads private signed prekey + one-time prekeys into [store]. Returns false if missing/corrupt.
+Future<bool> hydrateCliSignalStore(
+  InMemorySignalProtocolStore store,
+  String userId,
+) async {
+  final f = cliSignalKeysFile(userId);
+  if (!await f.exists()) return false;
+  try {
+    final m = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+    final spkB64 = m['signed_prekey_record_b64'] as String?;
+    if (spkB64 == null || spkB64.isEmpty) return false;
+    final spk = SignedPreKeyRecord.fromSerialized(base64Decode(spkB64));
+    store.storeSignedPreKey(spk.id, spk);
+    final list = m['prekeys'] as List<dynamic>? ?? [];
+    for (final raw in list) {
+      final row = raw as Map<String, dynamic>;
+      final id = row['id'] as int;
+      final b64 = row['record_b64'] as String;
+      store.storePreKey(id, PreKeyRecord.fromBuffer(base64Decode(b64)));
+    }
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/// Ensures Supabase latest signed_prekey_id matches serialized private material on disk.
+/// If not, uploads a new signed prekey + batch of one-time prekeys and rewrites the local file.
+Future<void> ensureCliSignalKeysPublished({
+  required String logTag,
+  required E2EIdentity me,
+  required SupabaseRest supa,
+}) async {
+  Map<String, dynamic>? serverKeys;
+  try {
+    serverKeys = await supa.fetchRecipientKeys(me.userId);
+  } catch (e) {
+    logLine(logTag, '[KEYS] fetch published keys: $e');
+    serverKeys = null;
+  }
+
+  final serverSpkId = serverKeys != null ? serverKeys['signed_prekey_id'] as int? : null;
+
+  SignedPreKeyRecord? diskSpk;
+  final kf = cliSignalKeysFile(me.userId);
+  if (await kf.exists()) {
+    try {
+      final m = jsonDecode(await kf.readAsString()) as Map<String, dynamic>;
+      final b64 = m['signed_prekey_record_b64'] as String?;
+      if (b64 != null && b64.isNotEmpty) {
+        diskSpk = SignedPreKeyRecord.fromSerialized(base64Decode(b64));
+      }
+    } catch (_) {}
+  }
+
+  final aligned = diskSpk != null && serverSpkId != null && diskSpk.id == serverSpkId;
+  if (aligned) {
+    logLine(logTag, '[KEYS] local keystore matches server (signed_prekey_id=$serverSpkId)');
+    return;
+  }
+
+  if (diskSpk != null && serverSpkId != null) {
+    logLine(
+      logTag,
+      '[KEYS] local SPK id ${diskSpk.id} != server $serverSpkId — publishing new SPK + prekeys',
+    );
+  } else {
+    logLine(logTag, '[KEYS] publishing signed prekey + one-time prekeys');
+  }
+
+  final spkId = DateTime.now().millisecondsSinceEpoch % 0xFFFF;
+  final nonZeroSpkId = spkId == 0 ? 1 : spkId;
+  final spk = KeyHelper.generateSignedPreKey(me.keyPair, nonZeroSpkId);
+  await supa.upsertSignedPreKey(
+    userId: me.userId,
+    keyId: nonZeroSpkId,
+    publicKeyB64: base64Encode(spk.getKeyPair().publicKey.serialize()),
+    signatureB64: base64Encode(spk.signature),
+  );
+
+  final startId = Random.secure().nextInt(900000) + 100000;
+  final prekeys = KeyHelper.generatePreKeys(startId, 10);
+  await supa.insertPreKeys(
+    userId: me.userId,
+    preKeys: prekeys.map((p) => MapEntry(p.id, p.getKeyPair())).toList(),
+  );
+  await persistCliSignalKeysFile(
+    userId: me.userId,
+    signedPreKey: spk,
+    preKeys: prekeys,
+  );
+  logLine(logTag, '[KEYS] saved local keystore (signed_prekey_id=$nonZeroSpkId, ${prekeys.length} prekeys)');
+}
+
+/// Base64(utf8("session_reset")) — relay rejects empty ciphertext on type message.
+const kRelaySessionResetCiphertextB64 = 'c2Vzc2lvbl9yZXNldA==';
+
 // ── Relay client (WebSocket) ───────────────────────────────────────────────
 
 class RelayConn {
+  RelayConn({
+    required this.channel,
+    required this.sub,
+    required this.incoming,
+  });
+
   final WebSocketChannel channel;
   final StreamSubscription sub;
   final StreamController<Map<String, dynamic>> incoming;
 
-  RelayConn({required this.channel, required this.sub, required this.incoming});
+  /// While true, every decoded frame is also appended here. Broadcast [incoming]
+  /// drops events when no listener is attached — the gap between [auth_ok] and
+  /// [incoming.stream.listen] in CLIs would lose [session_reset] and ciphertext.
+  final List<Map<String, dynamic>> preRecvBuffer = [];
+  bool bufferInboundFrames = true;
+
+  /// Call once you are ready to subscribe to [incoming] for app traffic. Returns
+  /// all frames received so far (including [auth_ok]), stops buffering, then attach
+  /// your listener so subsequent frames are delivered exactly once.
+  List<Map<String, dynamic>> detachPreRecvBufferAndStopBuffering() {
+    final out = List<Map<String, dynamic>>.from(preRecvBuffer);
+    preRecvBuffer.clear();
+    bufferInboundFrames = false;
+    return out;
+  }
 
   Future<void> dispose() async {
     await sub.cancel();
     await channel.sink.close();
     await incoming.close();
   }
+}
+
+/// First relay payload with non-empty ciphertext (any peer), for startup replay.
+Map<String, dynamic>? firstCiphertextFromAny(
+  Iterable<Map<String, dynamic>> packets,
+) {
+  for (final p in packets) {
+    final from = p['from'] as String?;
+    final ct = p['ciphertext'];
+    if (from != null &&
+        from.isNotEmpty &&
+        ct is String &&
+        ct.isNotEmpty) {
+      return p;
+    }
+  }
+  return null;
 }
 
 Map<String, String> buildHandshake({
@@ -307,14 +464,20 @@ Future<RelayConn> connectAndAuth({
   await ch.ready;
 
   final incoming = StreamController<Map<String, dynamic>>.broadcast();
+  late final RelayConn conn;
   final sub = ch.stream.listen((raw) {
     try {
       final packet = jsonDecode(raw as String) as Map<String, dynamic>;
+      if (conn.bufferInboundFrames) {
+        conn.preRecvBuffer.add(packet);
+      }
       incoming.add(packet);
     } catch (_) {
       // ignore parse errors
     }
   });
+
+  conn = RelayConn(channel: ch, sub: sub, incoming: incoming);
 
   final hs = buildHandshake(uid: uid, identityKeyPair: identityKeyPair);
   ch.sink.add(jsonEncode(hs));
@@ -326,7 +489,7 @@ Future<RelayConn> connectAndAuth({
       .timeout(authTimeout);
 
   logLine(name, '[CLIENT] authentication success');
-  return RelayConn(channel: ch, sub: sub, incoming: incoming);
+  return conn;
 }
 
 // ── Signal session build (X3DH via PreKeyBundle) ────────────────────────────
@@ -347,6 +510,14 @@ Future<BuiltSession> buildSession({
   logLine(name, '[SESSION] building session with ${contactUserId.substring(0, 8)}…');
 
   final store = InMemorySignalProtocolStore(me.keyPair, me.registrationId);
+  final hydrated = await hydrateCliSignalStore(store, me.userId);
+  if (!hydrated) {
+    logLine(
+      name,
+      '[SESSION] warning: no local signal keystore — inbound PreKey decrypt may fail',
+    );
+  }
+
   final keys = await supa.fetchRecipientKeys(contactUserId);
 
   final identityKeyBytes = base64Decode(keys['identity_key'] as String);

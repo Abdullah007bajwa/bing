@@ -116,8 +116,19 @@ class PrekeyManagementService {
           debugPrint('[PrekeyManagement] Generating $toGenerate new prekeys...');
         }
 
+        var localMax = 0;
+        final localRows = await _db.loadAllSignalPreKeyRecords();
+        for (final r in localRows) {
+          final id = r['key_id'];
+          if (id is int && id > localMax) localMax = id;
+        }
+        final serverMax =
+            await _keysUploadService.fetchMaxPrekeyKeyId(userId: userId);
+        final startId =
+            (localMax > serverMax ? localMax : serverMax) + 1;
+
         final newPreKeys = await generateOneTimePreKeys(
-          startId: count + 1,
+          startId: startId,
           count: toGenerate,
         );
 

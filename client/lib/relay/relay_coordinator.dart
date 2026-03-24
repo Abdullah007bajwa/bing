@@ -18,6 +18,11 @@ import 'websocket_client.dart';
 
 typedef IncomingPacketCallback = void Function(Map<String, dynamic> packet);
 
+/// Go relay rejects [type: message] with empty ciphertext. Session reset is not
+/// Signal data — clients handle [msg_type] before decrypt. Placeholder satisfies
+/// legacy servers until they allow empty cipher for session_reset.
+const String kRelaySessionResetCiphertextB64 = 'c2Vzc2lvbl9yZXNldA==';
+
 class RelayCoordinator {
   static final RelayCoordinator _instance = RelayCoordinator._();
   factory RelayCoordinator() => _instance;
@@ -35,6 +40,10 @@ class RelayCoordinator {
   static const int _sessionResetCooldownMs = 30000;
   final Map<String, int> _lastSessionResetSentMs = {};
   final _uuid = const Uuid();
+
+  /// Inbound frames must be handled in relay order. Parallel [Future] dispatch
+  /// let [session_reset] race ciphertext inserts / chat callbacks and desync Signal.
+  Future<void> _dispatchChain = Future<void>.value();
 
   bool get isConnected => _connected;
 
@@ -79,6 +88,7 @@ class RelayCoordinator {
   bool _isSessionResetPacket(Map<String, dynamic> packet) {
     final mt = packet['msg_type'];
     if (mt is String && mt == 'session_reset') return true;
+    if ('$mt' == 'session_reset') return true;
     return packet['type'] == 'session_reset';
   }
 
@@ -100,66 +110,72 @@ class RelayCoordinator {
       'from': fromUserId,
       'msg_type': 'session_reset',
       'ttl_seconds': 3600,
-      'ciphertext': '',
+      'ciphertext': kRelaySessionResetCiphertextB64,
     });
   }
 
   void _onPacket(Map<String, dynamic> packet) {
-    Future<void>(() async {
-      final from = packet['from'] as String?;
-      if (from == null || from.isEmpty) return;
+    _dispatchChain = _dispatchChain
+        .then((_) => _dispatchIncomingPacket(packet))
+        .catchError((Object e, StackTrace st) {
+          debugPrint('[RelayCoordinator] inbound chain error: $e');
+        });
+  }
 
-      await _ensureContactFor(from);
+  Future<void> _dispatchIncomingPacket(Map<String, dynamic> packet) async {
+    final from = packet['from'] as String?;
+    if (from == null || from.isEmpty) return;
 
-      if (_isSessionResetPacket(packet)) {
-        _buffer.putIfAbsent(from, () => []).add(packet);
-        if (!_incomingNotify.isClosed) _incomingNotify.add(from);
-        if (_currentChatUserId == from && _currentChatCallback != null) {
-          _currentChatCallback!(packet);
-        }
-        return;
-      }
+    await _ensureContactFor(from);
 
-      // Persist ciphertext immediately so messages are visible even if user isn't in the chat screen.
-      // Never store plaintext; decrypt happens later in ChatScreen.
-      final ciphertext = packet['ciphertext'] as String?;
-      if (ciphertext != null && ciphertext.isNotEmpty) {
-        final now = DateTime.now().millisecondsSinceEpoch;
-        final incomingId = (packet['id'] as String?)?.trim();
-        final msgType = packet['msg_type'];
-        final isPreKey = msgType == 'prekey' || msgType == 0;
-        final ttl = packet['ttl_seconds'] as int?;
-        final msg = GhostMessage(
-          id: (incomingId != null && incomingId.isNotEmpty) ? incomingId : now.toString(),
-          conversationId: from,
-          senderId: from,
-          ciphertext: ciphertext,
-          msgType: isPreKey ? MessageType.preKey : MessageType.signal,
-          createdAt: now,
-          ttlSeconds: ttl ?? 3600,
-          status: MessageStatus.delivered,
-          isRead: false,
-          decryptPending: 1,
-          decryptAttempts: 0,
-        );
-        await _db.insertMessage(msg.toDbMap());
-
-        // In-app feedback (sound/haptic) when a message arrives while app is open.
-        try {
-          FlutterRingtonePlayer().playNotification();
-          HapticFeedback.selectionClick();
-        } catch (_) {}
-      }
-
+    if (_isSessionResetPacket(packet)) {
       _buffer.putIfAbsent(from, () => []).add(packet);
-
-      // Notify listeners (e.g. ContactsScreen) to refresh UI.
       if (!_incomingNotify.isClosed) _incomingNotify.add(from);
-
       if (_currentChatUserId == from && _currentChatCallback != null) {
         _currentChatCallback!(packet);
       }
-    });
+      return;
+    }
+
+    // Persist ciphertext immediately so messages are visible even if user isn't in the chat screen.
+    // Never store plaintext; decrypt happens later in ChatScreen.
+    final ciphertext = packet['ciphertext'] as String?;
+    if (ciphertext != null && ciphertext.isNotEmpty) {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final incomingId = (packet['id'] as String?)?.trim();
+      final msgType = packet['msg_type'];
+      final isPreKey = msgType == 'prekey' || msgType == 0;
+      final ttl = packet['ttl_seconds'] as int?;
+      final msg = GhostMessage(
+        id: (incomingId != null && incomingId.isNotEmpty) ? incomingId : now.toString(),
+        conversationId: from,
+        senderId: from,
+        ciphertext: ciphertext,
+        msgType: isPreKey ? MessageType.preKey : MessageType.signal,
+        createdAt: now,
+        ttlSeconds: ttl ?? 3600,
+        status: MessageStatus.delivered,
+        isRead: false,
+        decryptPending: 1,
+        decryptAttempts: 0,
+      );
+      await _db.insertMessage(msg.toDbMap());
+
+      // In-app feedback (sound/haptic) when a message arrives while app is open.
+      try {
+        FlutterRingtonePlayer().playNotification();
+        HapticFeedback.selectionClick();
+      } catch (_) {}
+    }
+
+    _buffer.putIfAbsent(from, () => []).add(packet);
+
+    // Notify listeners (e.g. ContactsScreen) to refresh UI.
+    if (!_incomingNotify.isClosed) _incomingNotify.add(from);
+
+    if (_currentChatUserId == from && _currentChatCallback != null) {
+      _currentChatCallback!(packet);
+    }
   }
 
   Future<void> _ensureContactFor(String userId) async {

@@ -28,6 +28,8 @@ Plaintext exists only in RAM inside [`EphemeralCache`](lib/core/storage/ephemera
 
 [`bin/client_sender.dart`](bin/client_sender.dart) mirrors the same ideas for headless testing: rate-limited `session_reset` notifications before local rebuild on send-side heal, handling of inbound `session_reset`, and file-backed session state under `tool/session_<recipient>.json`.
 
+Decrypting an inbound **PreKey** message requires the CLI identity’s **private** signed prekey and one-time prekeys in memory, same as [`SignalKeyService.hydrateStore`](lib/core/crypto/signal_key_service.dart) on the phone. The CLI persists that material next to the identity in `tool/signal_local_keys_<your_uid>.json` (see [`ensureCliSignalKeysPublished`](bin/_e2e/common.dart) in [`bin/_e2e/common.dart`](bin/_e2e/common.dart)). If that file is missing or its signed prekey id does not match the latest row Supabase returns for your user, the CLI uploads a new signed prekey batch and overwrites the file.
+
 ## Bottlenecks and design tradeoffs
 
 - **Ordering** — Pending decrypts are processed in `created_at` order; one successful decrypt may advance the ratchet so [`_drainPendingDecrypts`](lib/features/chat/chat_screen.dart) loops until no progress (Signal’s chain order).

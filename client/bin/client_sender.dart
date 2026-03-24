@@ -65,27 +65,17 @@ Future<void> main(List<String> args) async {
 
     try {
       await supa.fetchRecipientKeys(me.userId);
-      logLine(name, '[SUPABASE] identity exists, skipping upload');
+      logLine(name, '[SUPABASE] user row + keys query ok');
     } catch (_) {
-      logLine(name, '[SUPABASE] uploading identity + prekeys');
-      await supa.upsertUser(userId: me.userId, identityKeyB64: identityKeyB64, registrationId: me.registrationId);
-
-    final spkId = DateTime.now().millisecondsSinceEpoch % 0xFFFF;
-    final spk = KeyHelper.generateSignedPreKey(me.keyPair, spkId);
-    await supa.upsertSignedPreKey(
-      userId: me.userId,
-      keyId: spkId,
-      publicKeyB64: base64Encode(spk.getKeyPair().publicKey.serialize()),
-      signatureB64: base64Encode(spk.signature),
-    );
-
-      final prekeys = KeyHelper.generatePreKeys(1, 10);
-      await supa.insertPreKeys(
+      logLine(name, '[SUPABASE] registering user row');
+      await supa.upsertUser(
         userId: me.userId,
-        preKeys: prekeys.map((p) => MapEntry(p.id, p.getKeyPair())).toList(),
+        identityKeyB64: identityKeyB64,
+        registrationId: me.registrationId,
       );
-      logLine(name, '[SUPABASE] upload ok');
     }
+
+    await ensureCliSignalKeysPublished(logTag: name, me: me, supa: supa);
 
     final conn = await connectAndAuth(
       name: name,
@@ -108,7 +98,7 @@ Future<void> main(List<String> args) async {
         'to': recipientUid,
         'id': newMsgId(),
         'msg_type': 'session_reset',
-        'ciphertext': '',
+        'ciphertext': kRelaySessionResetCiphertextB64,
         'ttl_seconds': 3600,
         'timestamp': now,
       };
@@ -123,14 +113,27 @@ Future<void> main(List<String> args) async {
     final storeFile = File('${Directory.current.path}${Platform.pathSeparator}tool${Platform.pathSeparator}session_$recipientUid.json');
     final addr = SignalProtocolAddress(recipientUid, 1);
     BuiltSession? built;
-    
+    /// True only if we restored ratchet state from [storeFile] this run — used to detect
+    /// corrupt/stale disk state (encrypt still returns prekey). Must NOT use [storeFile.exists]
+    /// alone: after [saveSession] the file always exists, but the first post-X3DH send is
+    /// legitimately a prekey message.
+    var usedDiskSessionAtStart = false;
+
     if (await storeFile.exists()) {
       try {
         final b64 = await storeFile.readAsString();
         final record = SessionRecord.fromSerialized(base64Decode(b64));
         final store = InMemorySignalProtocolStore(me.keyPair, me.registrationId);
+        final okKeys = await hydrateCliSignalStore(store, me.userId);
+        if (!okKeys) {
+          logLine(
+            name,
+            '[SESSION] no local keystore while loading session — run once to publish keys',
+          );
+        }
         await store.storeSession(addr, record);
         built = BuiltSession(store: store, cipher: SessionCipher.fromStore(store, addr));
+        usedDiskSessionAtStart = true;
         logLine(name, '[SESSION] loaded existing session');
       } catch (_) {}
     }
@@ -170,16 +173,27 @@ Future<void> main(List<String> args) async {
       store = fresh.store;
       cipher = fresh.cipher;
       await saveSession();
+      usedDiskSessionAtStart = false;
     }
 
     await saveSession(); // save initial build if generated
 
-    // Receive loop (decrypt any message from recipientUid)
-    final recvSub = conn.incoming.stream.listen((p) async {
+    // Serialize inbound handling: async [Stream.listen] runs handlers concurrently, so a
+    // [session_reset] could still be in [resetSession] while the next frame decrypts with
+    // the stale ratchet — phone then never catches up. Chain futures so each packet waits
+    // for the previous handler to finish.
+    Future<void> recvChain = Future<void>.value();
+
+    Future<void> handleInboundPacket(Map<String, dynamic> p) async {
       try {
         if ((p['from'] as String?) != recipientUid) return;
         final mt = p['msg_type'];
-        if (mt == 'session_reset' || p['type'] == 'session_reset') {
+        final mtStr = mt is String ? mt : '$mt';
+        final isSessionReset = mt == 'session_reset' ||
+            mtStr == 'session_reset' ||
+            p['type'] == 'session_reset';
+        if (isSessionReset) {
+          logLine(name, '[SESSION] received session_reset from peer');
           await resetSession(reason: 'peer session_reset');
           return;
         }
@@ -188,12 +202,18 @@ Future<void> main(List<String> args) async {
         final pt = await decryptAsync(store: store, cipher: cipher, packet: p);
         await saveSession();
         logLine(name, '[RECV] from=${recipientUid.substring(0, 8)}… plaintext="$pt"');
-      } catch (e) {
+      } catch (e, st) {
         logLine(name, '[RECV] decrypt failed: $e');
-        // Auto-recover stale sender-side session state used for long convo testing.
-        if ('$e'.contains('Bad Mac') ||
-            '$e'.contains('InvalidMessageException') ||
-            '$e'.contains('InvalidKeyException')) {
+        logLine(name, '[RECV] stack: ${st.toString()}');
+        final es = e.toString();
+        if (es.contains('Bad Mac') ||
+            es.contains('InvalidMessageException') ||
+            es.contains('InvalidKeyException') ||
+            es.contains('InvalidKeyIdException') ||
+            es.contains('signedprekeyrecord') ||
+            es.contains('No session') ||
+            es.contains('NoSessionException') ||
+            es.contains('Uninitialized session')) {
           try {
             await resetSession(reason: 'receive failure');
           } catch (rebuildErr) {
@@ -201,9 +221,44 @@ Future<void> main(List<String> args) async {
           }
         }
       }
+    }
+
+    final backlog = conn.detachPreRecvBufferAndStopBuffering();
+    if (backlog.isNotEmpty) {
+      logLine(
+        name,
+        '[RELAY] replaying ${backlog.length} inbound frame(s) buffered before recv attach',
+      );
+    }
+    for (final p in backlog) {
+      recvChain = recvChain
+          .then((_) => handleInboundPacket(p))
+          .catchError((Object e, StackTrace st) {
+            logLine(name, '[RECV] inbound chain error: $e');
+          });
+    }
+
+    final recvSub = conn.incoming.stream.listen((dynamic raw) {
+      Map<String, dynamic>? p;
+      try {
+        p = raw as Map<String, dynamic>;
+      } catch (_) {
+        return;
+      }
+      recvChain = recvChain
+          .then((_) => handleInboundPacket(p!))
+          .catchError((Object e, StackTrace st) {
+            logLine(name, '[RECV] inbound chain error: $e');
+          });
+    }, onError: (err, st) {
+      logLine(name, '[RECV] stream onError: $err');
+      logLine(name, '[RECV] stack: ${st.toString()}');
     });
 
     Future<void> sendText(String text) async {
+      // Apply any queued [session_reset] / decrypts before encrypting so we do not send
+      // with a stale ratchet after the phone cleared the session.
+      await recvChain;
       Map<String, dynamic> enc;
       try {
         enc = await encryptAsync(cipher: cipher, plaintext: text);
@@ -212,11 +267,12 @@ Future<void> main(List<String> args) async {
         await resetSession(reason: 'encrypt failure', notifyPeer: true);
         enc = await encryptAsync(cipher: cipher, plaintext: text);
       }
-      // If we loaded an existing session but still emit prekey, it's usually stale.
-      // Rebuild once so extended back-and-forth tests can continue.
-      if (enc['type'] == 3 && await storeFile.exists()) {
+      // If we *restored* from disk but encrypt still emits prekey, ratchet file is inconsistent.
+      // One rebuild only; never key off [storeFile.exists] (true after every [saveSession]).
+      if (enc['type'] == 3 && usedDiskSessionAtStart) {
+        usedDiskSessionAtStart = false;
         await resetSession(
-          reason: 'prekey from persisted session',
+          reason: 'prekey after restored session (stale file)',
           notifyPeer: true,
         );
         enc = await encryptAsync(cipher: cipher, plaintext: text);
@@ -235,6 +291,7 @@ Future<void> main(List<String> args) async {
       };
       conn.channel.sink.add(jsonEncode(pkt));
       logLine(name, '[SEND] id=${msgId.substring(0, 8)}… msg_type=${pkt['msg_type']}');
+      usedDiskSessionAtStart = false;
     }
 
     if (initialMessage != null && initialMessage.trim().isNotEmpty) {

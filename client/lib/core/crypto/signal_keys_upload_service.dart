@@ -240,6 +240,30 @@ class SignalKeysUploadService {
     }
   }
 
+  /// Highest `key_id` present in `prekeys` for this user (used or unused).
+  /// New one-time prekey IDs must be strictly greater to avoid insert conflicts
+  /// and to stay consistent with [PrekeyManagementService.generateOneTimePreKeys].
+  Future<int> fetchMaxPrekeyKeyId({required String userId}) async {
+    try {
+      final row = await _supabase
+          .from('prekeys')
+          .select('key_id')
+          .eq('user_id', userId)
+          .order('key_id', ascending: false)
+          .limit(1)
+          .maybeSingle();
+      if (row == null) return 0;
+      final id = row['key_id'];
+      if (id is int) return id;
+      return 0;
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[SignalKeysUpload] Error fetching max prekey id: $e');
+      }
+      return 0;
+    }
+  }
+
   /// Get count of unused prekeys
   Future<int> getUnusedPrekeyCount({required String userId}) async {
     try {

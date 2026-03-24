@@ -6,7 +6,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 import 'base64_util.dart';
-import 'decrypt_failure.dart';
+import 'decrypt_failure.dart' show DecryptFailureType, classifyDecryptError, DecryptException, SessionDesyncException;
 import 'signal_session_builder.dart';
 import 'signal_keys_upload_service.dart';
 import '../storage/secure_db.dart';
@@ -52,9 +52,9 @@ class SignalSessionService {
     if (sessionB64 == null || sessionB64.isEmpty) return;
     try {
       final record = SessionRecord.fromSerialized(safeBase64Decode(sessionB64));
-      if (record.sessionState.hasSenderChain()) {
-        await store.storeSession(address, record);
-      }
+      // Persist + reload receiver-chain-only sessions too.
+      // Decryption can advance receiver ratchets even before we have sender state.
+      await store.storeSession(address, record);
     } catch (_) {}
   }
 
@@ -102,7 +102,6 @@ class SignalSessionService {
     try {
       final address = SignalProtocolAddress(contactUserId, deviceId);
       final record = await store.loadSession(address);
-      if (!record.sessionState.hasSenderChain()) return;
       final b64 = base64Encode(record.serialize());
       await _db.storeSessionState('$contactUserId.$deviceId', b64);
     } catch (_) {}
@@ -141,7 +140,13 @@ class SignalSessionService {
     void Function()? onBeforeSessionRebuild,
   }) async {
     var workCipher = cipher;
+    var hadPersistedSessionBlob = false;
     if (store != null && contactUserId != null) {
+      final existingBlob =
+          await _db.loadSessionState('$contactUserId.$deviceId');
+      hadPersistedSessionBlob =
+          existingBlob != null && existingBlob.isNotEmpty;
+
       await reloadSessionFromDb(
         store: store,
         contactUserId: contactUserId,
@@ -194,7 +199,34 @@ class SignalSessionService {
 
       _logCryptoMetric('encrypt_fail', {'contact': contactUserId, 'error': e.toString()});
       if (kDebugMode) {
-        debugPrint('[SignalSession] Encrypt failed; self-healing: $e');
+        debugPrint('[SignalSession] Encrypt failed: $e');
+      }
+
+      final remoteAddress = SignalProtocolAddress(contactUserId, deviceId);
+      final hasInMemorySession = await store.containsSession(remoteAddress);
+
+      // Never clear + outbound X3DH rebuild if we already had any session for
+      // this peer. [processPreKeyBundle] archives the old ratchet and creates a
+      // *new* Alice session here, while the peer (e.g. CLI) still uses their
+      // original file session → their ciphertexts fail with badMAC on us, while
+      // our ciphertexts may still decrypt on them.
+      if (hadPersistedSessionBlob || hasInMemorySession) {
+        _logCryptoMetric('encrypt_fail_no_rebuild', {
+          'contact': contactUserId,
+          'hadBlob': hadPersistedSessionBlob,
+          'hadMemory': hasInMemorySession,
+        });
+        if (kDebugMode) {
+          debugPrint(
+            '[SignalSession] Encrypt failed with existing session — '
+            'caller should run bilateral auto-repair (session_reset + clear + retry).',
+          );
+        }
+        throw SessionDesyncException(e);
+      }
+
+      if (kDebugMode) {
+        debugPrint('[SignalSession] Encrypt self-heal: first-time outbound X3DH');
       }
 
       onBeforeSessionRebuild?.call();
@@ -205,7 +237,6 @@ class SignalSessionService {
         deviceId: deviceId,
       );
 
-      final remoteAddress = SignalProtocolAddress(contactUserId, deviceId);
       final sessionBuilder = SignalSessionBuilder(
         store: store,
         keysService: SignalKeysUploadService(),
@@ -276,6 +307,9 @@ class SignalSessionService {
       });
 
       var thrown = firstError;
+      // Never call [SignalSessionBuilder.buildSession] here: that runs outbound X3DH
+      // (processPreKeyBundle with *their* keys) and does not recreate the inbound ratchet
+      // established when *they* sent us a PreKey — wrong session → endless badMac.
       if (store != null && contactUserId != null && kind != DecryptFailureType.duplicatePrekey) {
         await reloadSessionFromDb(
           store: store,

@@ -100,19 +100,16 @@ class SignalKeyService {
       // breaks session establishment for others.
       try {
         final signedPreKeyPublic = existing.getKeyPair().publicKey;
-        final expectedSig = Curve.calculateSignature(
-          identityKeyPair.getPrivateKey(),
+        // Must verify with Curve.verifySignature — calculateSignature() is
+        // non-deterministic (uses fresh randomness per call), so comparing
+        // bytes to the stored signature always fails and spuriously regenerates.
+        final signatureValid = Curve.verifySignature(
+          identityKeyPair.getPublicKey().publicKey,
           signedPreKeyPublic.serialize(),
+          existing.signature,
         );
 
-        final actualSig = existing.signature;
-        final signatureMatches =
-            expectedSig.length == actualSig.length &&
-            Iterable<int>.generate(actualSig.length).every(
-              (i) => expectedSig[i] == actualSig[i],
-            );
-
-        if (signatureMatches) return existing;
+        if (signatureValid) return existing;
 
         if (kDebugMode) {
           debugPrint(
