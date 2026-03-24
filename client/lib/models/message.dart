@@ -26,6 +26,8 @@ class GhostMessage {
   final String? lastDecryptError;
   /// 1 = duplicate/consumed prekey etc.; do not retry blindly.
   final int decryptPermanentFail;
+  /// Cleartext for UI only; stored inside SQLCipher (survives process / hot restart).
+  final String? bodyPlaintext;
 
   const GhostMessage({
     required this.id,
@@ -45,6 +47,7 @@ class GhostMessage {
     this.decryptAttempts = 0,
     this.lastDecryptError,
     this.decryptPermanentFail = 0,
+    this.bodyPlaintext,
   });
 
   Map<String, dynamic> toDbMap() => {
@@ -64,6 +67,7 @@ class GhostMessage {
     'decrypt_attempts':     decryptAttempts,
     'last_decrypt_error':   lastDecryptError,
     'decrypt_permanent_fail': decryptPermanentFail,
+    'body_plaintext': bodyPlaintext,
   };
 
   factory GhostMessage.fromDbMap(Map<String, dynamic> m) => GhostMessage(
@@ -83,6 +87,7 @@ class GhostMessage {
     decryptAttempts: (m['decrypt_attempts'] as int?) ?? 0,
     lastDecryptError: m['last_decrypt_error'] as String?,
     decryptPermanentFail: (m['decrypt_permanent_fail'] as int?) ?? 0,
+    bodyPlaintext: m['body_plaintext'] as String?,
   );
 
   Map<String, dynamic> toRelayPacket(String toUserId) => {
@@ -101,6 +106,7 @@ class GhostMessage {
     int? decryptAttempts,
     String? lastDecryptError,
     int? decryptPermanentFail,
+    String? bodyPlaintext,
   }) =>
     GhostMessage(
       id:             id,
@@ -120,5 +126,6 @@ class GhostMessage {
       decryptAttempts: decryptAttempts ?? this.decryptAttempts,
       lastDecryptError: lastDecryptError ?? this.lastDecryptError,
       decryptPermanentFail: decryptPermanentFail ?? this.decryptPermanentFail,
+      bodyPlaintext: bodyPlaintext ?? this.bodyPlaintext,
     );
 }

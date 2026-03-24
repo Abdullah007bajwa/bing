@@ -38,15 +38,15 @@ class GhostRelayClient {
 
   String? _userIdHeader;
   String? _relayUrl;
-  Map<String, String>? _authHandshake;
+  /// Called on every connect/reconnect so the timestamp stays inside the server ±5m window.
+  Future<Map<String, String>> Function()? _authHandshakeFactory;
   bool _authenticated = false;
 
-  /// Whether the relay has accepted the connection (handshake sent; server may or may not send auth_ok).
+  /// True only after the server sends [auth_ok] (not merely after the socket opens).
   bool get isAuthenticated => _authenticated;
 
-  /// Set relay authentication handshake for signed connection
-  void setAuthHandshake(Map<String, String> handshake) {
-    _authHandshake = handshake;
+  void setAuthHandshakeFactory(Future<Map<String, String>> Function()? factory) {
+    _authHandshakeFactory = factory;
   }
 
   /// Builds WSS URL with required uid query param. Relay rejects connection without it.
@@ -94,10 +94,18 @@ class GhostRelayClient {
         onDone:  _onDone,
       );
 
-      if (_authHandshake != null) {
-        _channel!.sink.add(jsonEncode(_authHandshake));
+      _authenticated = false;
+      Map<String, String>? handshake;
+      if (_authHandshakeFactory != null) {
+        try {
+          handshake = await _authHandshakeFactory!();
+        } catch (e) {
+          if (kDebugMode) debugPrint('[Relay] Auth handshake build failed: $e');
+        }
       }
-      _authenticated = true;
+      if (handshake != null) {
+        _channel!.sink.add(jsonEncode(handshake));
+      }
       onConnected?.call();
     } catch (e) {
       _authenticated = false;

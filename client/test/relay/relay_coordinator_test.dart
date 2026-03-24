@@ -26,7 +26,7 @@ void main() {
     test('setCurrentChat with callback does not throw', () {
       final coordinator = RelayCoordinator();
       expect(
-        () => coordinator.setCurrentChat('user1', (_) {}),
+        () => coordinator.setCurrentChat('user1', (_) async {}),
         returnsNormally,
       );
       coordinator.setCurrentChat(null, null);

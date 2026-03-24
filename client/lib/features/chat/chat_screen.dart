@@ -10,7 +10,6 @@ import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:flutter_animate/flutter_animate.dart';
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 import 'package:uuid/uuid.dart';
 import '../../core/crypto/signal_session.dart';
@@ -369,6 +368,7 @@ class _ChatScreenState extends State<ChatScreen> {
         lastDecryptError: null,
         decryptPermanentFail: 0,
       );
+      await _db.updateMessageBodyPlaintext(msg.id, plaintext);
       _cache.cacheMessage(
         msg.id,
         plaintext,
@@ -618,18 +618,21 @@ class _ChatScreenState extends State<ChatScreen> {
       createdAt:      now,
       ttlSeconds:     _ephemeralEnabled ? _ttlSeconds : 0,
       status:         MessageStatus.sending,
+      bodyPlaintext:  text,
     );
 
     // Cache plaintext for immediate display
     _cache.cacheMessage(msgId, text, ttl: Duration(seconds: _ttlSeconds));
 
-    // Persist ciphertext
+    // Show bubble before awaiting DB so UI updates immediately (async gap used to skip setState).
+    if (mounted) {
+      setState(() => _messages = [..._messages, msg]);
+    }
+    _scrollToBottom();
+
     await _db.insertMessage(msg.toDbMap());
 
     if (!mounted) return;
-
-    setState(() => _messages.add(msg));
-    _scrollToBottom();
 
     final ciphertext = encrypted['ciphertext'] as String?;
     if (ciphertext == null || ciphertext.isEmpty) {
@@ -654,8 +657,10 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         final idx = _messages.indexWhere((m) => m.id == msgId);
         if (idx != -1) {
-          _messages[idx] = msg.copyWith(
-              status: sent ? MessageStatus.sent : MessageStatus.sending);
+          final next = msg.copyWith(
+            status: sent ? MessageStatus.sent : MessageStatus.sending,
+          );
+          _messages = List<GhostMessage>.from(_messages)..[idx] = next;
         }
       });
     }
@@ -762,7 +767,13 @@ class _ChatScreenState extends State<ChatScreen> {
               controller:  _scrollController,
               padding:     const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               itemCount:   _messages.length,
-              itemBuilder: (_, i) => _buildBubble(_messages[i]),
+              itemBuilder: (_, i) {
+                final m = _messages[i];
+                return KeyedSubtree(
+                  key: ValueKey<String>(m.id),
+                  child: _buildBubble(m),
+                );
+              },
             ),
           ),
           _buildComposeBar(cs),
@@ -774,14 +785,22 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _buildBubble(GhostMessage msg) {
     final isMe      = msg.senderId == _myUserId;
     final cached = _cache.getMessage(msg.id);
+    final persisted = msg.bodyPlaintext;
+    final canTryDecrypt = !isMe &&
+        cached == null &&
+        (persisted == null || persisted.isEmpty) &&
+        msg.decryptPermanentFail == 0;
     final plaintext = cached ??
-        (isMe ? '[Encrypted — not in memory]' : '[Tap to decrypt]');
+        persisted ??
+        (isMe
+            ? (msg.status == MessageStatus.sending ? 'Sending…' : 'Sent')
+            : '[Tap to decrypt]');
     final cs        = Theme.of(context).colorScheme;
 
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
       child: GestureDetector(
-        onTap: (!isMe && cached == null) ? () => _decryptForDisplay(msg) : null,
+        onTap: canTryDecrypt ? () => _decryptForDisplay(msg) : null,
         child: Container(
           margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 4),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -846,7 +865,7 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ],
           ),
-        ).animate().fadeIn(duration: 200.ms).slideY(begin: 0.1),
+        ),
       ),
     );
   }
@@ -892,7 +911,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 hintText: 'Message…',
                 contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               ),
-              onSubmitted: (_) => _sendMessage(),
+              onSubmitted: _canSend ? (_) => _sendMessage() : null,
             ),
           ),
           const SizedBox(width: 8),

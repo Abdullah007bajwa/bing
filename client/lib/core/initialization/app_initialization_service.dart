@@ -229,14 +229,18 @@ class AppInitializationService {
         return false;
       }
 
-      // Generate signed handshake for relay authentication
-      final handshake = await _relayAuthService.generateAuthHandshake(
-        userId: userId,
-        identityKeyPair: identityKeyPair,
-      );
-
-      // Set handshake on relay client before connecting
-      _relayClient.setAuthHandshake(handshake);
+      // Fresh timestamp on every connect/reconnect (server rejects stale handshakes after ~5m).
+      _relayClient.setAuthHandshakeFactory(() async {
+        final uid = await _identityService.getUserId();
+        final kp = await _identityService.loadIdentityKeyPair();
+        if (uid.isEmpty || kp == null) {
+          throw StateError('RelayAuth: missing userId or identity keys');
+        }
+        return _relayAuthService.generateAuthHandshake(
+          userId: uid,
+          identityKeyPair: kp,
+        );
+      });
 
       // Connect to relay
       await _relayClient.connect(

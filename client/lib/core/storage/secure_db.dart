@@ -14,7 +14,7 @@ import 'package:path/path.dart' as path;
 
 const _kDbKeyStorageKey = 'ghost_db_encryption_key';
 const _kDbFileName      = 'ghost.db';
-const _kDbVersion       = 4;
+const _kDbVersion       = 5;
 
 class SecureDb {
   static final SecureDb _instance = SecureDb._();
@@ -70,7 +70,8 @@ class SecureDb {
         decrypt_pending       INTEGER NOT NULL DEFAULT 0,
         decrypt_attempts      INTEGER NOT NULL DEFAULT 0,
         last_decrypt_error    TEXT,
-        decrypt_permanent_fail INTEGER NOT NULL DEFAULT 0
+        decrypt_permanent_fail INTEGER NOT NULL DEFAULT 0,
+        body_plaintext      TEXT              -- local display only; DB is SQLCipher-encrypted
       )
     ''');
 
@@ -137,6 +138,17 @@ class SecureDb {
     await batch.commit(noResult: true);
   }
 
+  /// True if [table] has a column named [column] (for idempotent ALTERs).
+  Future<bool> _tableHasColumn(Database db, String table, String column) async {
+    final rows = await db.rawQuery('PRAGMA table_info($table)');
+    for (final r in rows) {
+      if (r['name'] == column) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   Future<void> _upgradeSchema(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
       await db.execute('ALTER TABLE messages ADD COLUMN status INTEGER NOT NULL DEFAULT 1');
@@ -165,6 +177,11 @@ class SecureDb {
       await db.execute('ALTER TABLE messages ADD COLUMN last_decrypt_error TEXT');
       await db.execute(
           'ALTER TABLE messages ADD COLUMN decrypt_permanent_fail INTEGER NOT NULL DEFAULT 0');
+    }
+    if (oldVersion < 5) {
+      if (!await _tableHasColumn(db, 'messages', 'body_plaintext')) {
+        await db.execute('ALTER TABLE messages ADD COLUMN body_plaintext TEXT');
+      }
     }
   }
 
@@ -288,6 +305,17 @@ class SecureDb {
         'last_decrypt_error': lastDecryptError,
         'decrypt_permanent_fail': decryptPermanentFail,
       },
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+  }
+
+  /// Persist plaintext for chat list after hot restart (SQLCipher at rest).
+  Future<void> updateMessageBodyPlaintext(String messageId, String plaintext) async {
+    final d = await db;
+    await d.update(
+      'messages',
+      {'body_plaintext': plaintext},
       where: 'id = ?',
       whereArgs: [messageId],
     );
@@ -475,7 +503,8 @@ class SecureDb {
     final d = await db;
 
     // Overwrite sensitive tables with garbage before deletion
-    await d.execute("UPDATE messages     SET ciphertext = 'XXXXXXXXXXXXXXXXXXXXXXXX'");
+    await d.execute(
+        "UPDATE messages SET ciphertext = 'XXXXXXXXXXXXXXXXXXXXXXXX', body_plaintext = NULL");
     await d.execute("UPDATE contacts     SET public_key_b64 = 'XXXX', fingerprint = 'XXXX'");
     await d.execute("UPDATE group_keys   SET key_b64 = 'XXXX'");
     await d.execute("UPDATE session_states SET session_b64 = 'XXXX'");

@@ -61,7 +61,7 @@ void main() {
       coordinator.setCurrentChat(null, null);
       expect(coordinator.getBufferedPackets('bob'), isEmpty);
 
-      coordinator.setCurrentChat('bob', (packet) {
+      coordinator.setCurrentChat('bob', (packet) async {
         expect(packet['from'], isNotNull);
         expect(packet['ciphertext'], isNotNull);
       });

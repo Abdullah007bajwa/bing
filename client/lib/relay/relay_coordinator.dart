@@ -16,7 +16,8 @@ import '../models/contact.dart';
 import '../models/message.dart';
 import 'websocket_client.dart';
 
-typedef IncomingPacketCallback = void Function(Map<String, dynamic> packet);
+/// Must be awaited by the coordinator so decrypt/UI finishes before the next inbound packet runs.
+typedef IncomingPacketCallback = Future<void> Function(Map<String, dynamic> packet);
 
 /// Go relay rejects [type: message] with empty ciphertext. Session reset is not
 /// Signal data — clients handle [msg_type] before decrypt. Placeholder satisfies
@@ -62,23 +63,23 @@ class RelayCoordinator {
     // Wire the global packet handler before connect so deliverPending and all incoming messages are handled
     _relay.onPacket = _onPacket;
 
+    final uid = userId.trim();
+    if (uid.isNotEmpty) {
+      _relay.setAuthHandshakeFactory(() async {
+        final kp = await _identity.loadIdentityKeyPair();
+        if (kp == null) {
+          throw StateError('RelayAuth: missing identity key pair');
+        }
+        return RelayAuthService().generateAuthHandshake(
+          userId: uid,
+          identityKeyPair: kp,
+        );
+      });
+    }
+
     if (_relay.isConnected) {
       _connected = true;
       return;
-    }
-
-    try {
-      final identityKeyPair = await _identity.loadIdentityKeyPair();
-      if (identityKeyPair != null) {
-        final authService = RelayAuthService();
-        final handshake = await authService.generateAuthHandshake(
-          userId: userId,
-          identityKeyPair: identityKeyPair,
-        );
-        _relay.setAuthHandshake(handshake);
-      }
-    } catch (e) {
-      debugPrint('[RelayCoordinator] Failed to generate handshake: $e');
     }
 
     await _relay.connect(relayUrl: relayUrl, userId: userId);
@@ -126,14 +127,21 @@ class RelayCoordinator {
     final from = packet['from'] as String?;
     if (from == null || from.isEmpty) return;
 
-    await _ensureContactFor(from);
+    final fromNorm = from.trim();
+    if (fromNorm.isEmpty) return;
+
+    await _ensureContactFor(fromNorm);
 
     if (_isSessionResetPacket(packet)) {
-      _buffer.putIfAbsent(from, () => []).add(packet);
-      if (!_incomingNotify.isClosed) _incomingNotify.add(from);
-      if (_currentChatUserId == from && _currentChatCallback != null) {
-        _currentChatCallback!(packet);
+      _buffer.putIfAbsent(fromNorm, () => []).add(packet);
+      if (_currentChatUserId == fromNorm && _currentChatCallback != null) {
+        try {
+          await _currentChatCallback!(packet);
+        } catch (e, st) {
+          debugPrint('[RelayCoordinator] chat callback error: $e\n$st');
+        }
       }
+      if (!_incomingNotify.isClosed) _incomingNotify.add(fromNorm);
       return;
     }
 
@@ -146,20 +154,29 @@ class RelayCoordinator {
       final msgType = packet['msg_type'];
       final isPreKey = msgType == 'prekey' || msgType == 0;
       final ttl = packet['ttl_seconds'] as int?;
-      final msg = GhostMessage(
-        id: (incomingId != null && incomingId.isNotEmpty) ? incomingId : now.toString(),
-        conversationId: from,
-        senderId: from,
-        ciphertext: ciphertext,
-        msgType: isPreKey ? MessageType.preKey : MessageType.signal,
-        createdAt: now,
-        ttlSeconds: ttl ?? 3600,
-        status: MessageStatus.delivered,
-        isRead: false,
-        decryptPending: 1,
-        decryptAttempts: 0,
-      );
-      await _db.insertMessage(msg.toDbMap());
+      final resolvedId = (incomingId != null && incomingId.isNotEmpty)
+          ? incomingId
+          : now.toString();
+      // Avoid REPLACE on existing id (ChatScreen may have inserted outbound row with body_plaintext).
+      final missingInDb = incomingId == null ||
+          incomingId.isEmpty ||
+          (await _db.getMessageById(incomingId)) == null;
+      if (missingInDb) {
+        final msg = GhostMessage(
+          id: resolvedId,
+          conversationId: fromNorm,
+          senderId: fromNorm,
+          ciphertext: ciphertext,
+          msgType: isPreKey ? MessageType.preKey : MessageType.signal,
+          createdAt: now,
+          ttlSeconds: ttl ?? 3600,
+          status: MessageStatus.delivered,
+          isRead: false,
+          decryptPending: 1,
+          decryptAttempts: 0,
+        );
+        await _db.insertMessage(msg.toDbMap());
+      }
 
       // In-app feedback (sound/haptic) when a message arrives while app is open.
       try {
@@ -168,14 +185,18 @@ class RelayCoordinator {
       } catch (_) {}
     }
 
-    _buffer.putIfAbsent(from, () => []).add(packet);
+    _buffer.putIfAbsent(fromNorm, () => []).add(packet);
 
-    // Notify listeners (e.g. ContactsScreen) to refresh UI.
-    if (!_incomingNotify.isClosed) _incomingNotify.add(from);
-
-    if (_currentChatUserId == from && _currentChatCallback != null) {
-      _currentChatCallback!(packet);
+    if (_currentChatUserId == fromNorm && _currentChatCallback != null) {
+      try {
+        await _currentChatCallback!(packet);
+      } catch (e, st) {
+        debugPrint('[RelayCoordinator] chat callback error: $e\n$st');
+      }
     }
+
+    // After chat has decrypted / updated read state when applicable.
+    if (!_incomingNotify.isClosed) _incomingNotify.add(fromNorm);
   }
 
   Future<void> _ensureContactFor(String userId) async {
@@ -214,13 +235,15 @@ class RelayCoordinator {
 
   /// Returns and clears buffered packets for this contact. Call when opening ChatScreen.
   List<Map<String, dynamic>> getBufferedPackets(String contactUserId) {
-    final list = _buffer.remove(contactUserId);
+    final t = contactUserId.trim();
+    final list = _buffer.remove(t);
     return list ?? [];
   }
 
   /// Set current chat so incoming packets for this contact are delivered to callback.
   void setCurrentChat(String? contactUserId, IncomingPacketCallback? callback) {
-    _currentChatUserId = contactUserId;
+    final t = contactUserId?.trim();
+    _currentChatUserId = (t == null || t.isEmpty) ? null : t;
     _currentChatCallback = callback;
   }
 

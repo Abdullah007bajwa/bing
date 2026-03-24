@@ -30,6 +30,8 @@ type AuthHandshake struct {
 // Returns (ok, reason). reason is safe to log.
 func VerifyAuthHandshake(ctx context.Context, uid string, timestamp string, signatureB64 string) (bool, string) {
 	const toleranceSeconds = 300
+	// Allow client clocks slightly ahead of the server (otherwise ageSec < 0 fails immediately).
+	const maxFutureSkewSeconds = 120
 
 	tsMs, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
@@ -37,7 +39,7 @@ func VerifyAuthHandshake(ctx context.Context, uid string, timestamp string, sign
 	}
 	nowMs := time.Now().UnixMilli()
 	ageSec := (nowMs - tsMs) / 1000
-	if ageSec < 0 || ageSec > toleranceSeconds {
+	if ageSec < -maxFutureSkewSeconds || ageSec > toleranceSeconds {
 		return false, "timestamp_out_of_tolerance"
 	}
 
