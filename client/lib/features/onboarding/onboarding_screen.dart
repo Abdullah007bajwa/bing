@@ -3,14 +3,12 @@
 // Security-first UX: no email, no password, no cloud sync.
 
 import 'dart:async';
-import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart' as signal;
 import '../../core/identity/identity_service.dart';
 import '../../core/crypto/signal_key_service.dart';
 import '../../core/crypto/prekey_management_service.dart';
@@ -47,33 +45,33 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
       // Step 2: Initialize Signal Protocol keys in correct order
       // This generates: identity key, registration ID, signed prekey, signature
-      await _signalKeyService.initializeSignalKeys();
+      final identityKeyPair = await _identity.loadIdentityKeyPair();
+      if (identityKeyPair != null) {
+        await _signalKeyService.initializeSignalKeys(identityKeyPair: identityKeyPair);
+      }
 
       // Step 3: Generate initial one-time prekeys (50+)
       final prekeyService = PrekeyManagementService();
       final initialPreKeys = await prekeyService.generateInitialPreKeys();
 
-      // Step 4: Upload public keys to Supabase
+      // Step 4: Upload public keys to Supabase (must match locally stored keys)
       final uploadService = SignalKeysUploadService();
 
-      // Get the keys we just generated
-      final identityKeyPair = await _identity.loadIdentityKeyPair();
       if (identityKeyPair != null) {
-        final regId = Random().nextInt(16384);
-        final signedPreKeyPair = signal.Curve.generateKeyPair();
-        final signedPreKeySig = signal.Curve.calculateSignature(
-          identityKeyPair.getPrivateKey(),
-          signedPreKeyPair.publicKey.serialize(),
-        );
+        final regId = await _signalKeyService.getRegistrationId();
+        final signedPreKey = await _signalKeyService.loadSignedPreKeyRecord();
+        if (signedPreKey == null) {
+          throw Exception('Missing local signed prekey record');
+        }
 
         // Upload identity + signed prekey
         await uploadService.uploadSignalKeys(
           userId: uid,
           identityKeyPair: identityKeyPair,
           registrationId: regId,
-          signedPreKeyPair: signedPreKeyPair,
-          signedPreKeyId: 1,
-          signedPreKeySignature: signedPreKeySig,
+          signedPreKeyPair: signedPreKey.getKeyPair(),
+          signedPreKeyId: signedPreKey.id,
+          signedPreKeySignature: signedPreKey.signature,
         );
 
         // Upload initial prekeys

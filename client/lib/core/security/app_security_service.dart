@@ -3,11 +3,25 @@
 // Screenshot blocking is always on and not user-configurable.
 
 import 'dart:io';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_windowmanager/flutter_windowmanager.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const _kBiometricLockEnabledKey = 'ghost_biometric_lock_enabled';
+
+enum AuthOutcome {
+  success,
+  cancelledOrFailed,
+  notAvailable,
+  notEnrolled,
+  lockedOut,
+  permanentlyLockedOut,
+  noCredentials,
+  passcodeNotSet,
+  error,
+}
 
 class AppSecurityService {
   static final AppSecurityService _instance = AppSecurityService._();
@@ -23,10 +37,11 @@ class AppSecurityService {
     await FlutterWindowManager.addFlags(FlutterWindowManager.FLAG_SECURE);
   }
 
-  /// Whether the user has enabled biometric app lock (stored in preferences).
   Future<bool> isBiometricLockEnabled() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool(_kBiometricLockEnabledKey) ?? false;
+    final enabled = prefs.getBool(_kBiometricLockEnabledKey) ?? false;
+    if (kDebugMode) debugPrint('[AppSecurityService] isBiometricLockEnabled: $enabled');
+    return enabled;
   }
 
   Future<void> setBiometricLockEnabled(bool enabled) async {
@@ -34,9 +49,10 @@ class AppSecurityService {
     await prefs.setBool(_kBiometricLockEnabledKey, enabled);
   }
 
-  /// Whether the device supports biometric or device credential.
   Future<bool> isBiometricAvailable() async {
-    return _localAuth.isDeviceSupported();
+    final available = await _localAuth.isDeviceSupported();
+    if (kDebugMode) debugPrint('[AppSecurityService] isBiometricAvailable: $available');
+    return available;
   }
 
   /// Get list of available biometric types (fingerprint, face, etc.).
@@ -50,16 +66,55 @@ class AppSecurityService {
     String reason = 'Unlock Ghost',
     bool useErrorDialogs = true,
   }) async {
+    final r = await authenticateOutcome(reason: reason, useErrorDialogs: useErrorDialogs);
+    return r == AuthOutcome.success;
+  }
+
+  Future<AuthOutcome> authenticateOutcome({
+    String reason = 'Unlock Ghost',
+    bool useErrorDialogs = true,
+  }) async {
     try {
-      return await _localAuth.authenticate(
+      final ok = await _localAuth.authenticate(
         localizedReason: reason,
         options: AuthenticationOptions(
           useErrorDialogs: useErrorDialogs,
           stickyAuth: true,
         ),
       );
-    } catch (_) {
-      return false;
+      if (kDebugMode) debugPrint('[AppSecurityService] Biometric auth result: $ok');
+      return ok ? AuthOutcome.success : AuthOutcome.cancelledOrFailed;
+    } on PlatformException catch (e) {
+      if (kDebugMode) debugPrint('[AppSecurityService] Biometric PlatformException: ${e.code} / ${e.message}');
+      // local_auth historically throws PlatformException with codes; newer versions
+      // can surface structured enums internally, but PlatformException remains common on Android OEM skins.
+      switch (e.code) {
+        case 'NotAvailable':
+        case 'notAvailable':
+          return AuthOutcome.notAvailable;
+        case 'NotEnrolled':
+        case 'notEnrolled':
+          return AuthOutcome.notEnrolled;
+        case 'LockedOut':
+        case 'lockedOut':
+        case 'temporaryLockout':
+          return AuthOutcome.lockedOut;
+        case 'PermanentlyLockedOut':
+        case 'permanentlyLockedOut':
+          return AuthOutcome.permanentlyLockedOut;
+        case 'PasscodeNotSet':
+        case 'passcodeNotSet':
+          return AuthOutcome.passcodeNotSet;
+        case 'noCredentialsSet':
+        case 'no_credentials':
+        case 'noCredentials':
+          return AuthOutcome.noCredentials;
+        default:
+          return AuthOutcome.error;
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('[AppSecurityService] Biometric unknown error: $e');
+      return AuthOutcome.error;
     }
   }
 }

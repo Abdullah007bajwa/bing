@@ -2,6 +2,7 @@
 // Main home screen: list of contacts (chats).
 // Add via QR scan or paste ID. All contacts stored locally in SQLCipher.
 
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_animate/flutter_animate.dart';
@@ -28,6 +29,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
   final _db = SecureDb();
   List<GhostContact> _contacts = [];
   bool _loading = true;
+  Map<String, int> _unread = {};
+  StreamSubscription<String>? _incomingSub;
 
   @override
   void initState() {
@@ -45,13 +48,26 @@ class _ContactsScreenState extends State<ContactsScreen> {
       );
     }
     await _loadContacts();
+
+    // Live refresh when a new packet/contact arrives (no restart needed)
+    _incomingSub ??= RelayCoordinator().incomingNotify.listen((_) {
+      _loadContacts();
+    });
+  }
+
+  @override
+  void dispose() {
+    _incomingSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadContacts() async {
     final rows = await _db.getAllContacts();
+    final unread = await _db.getUnreadCountsByConversation();
     if (mounted) {
       setState(() {
         _contacts = rows.map(GhostContact.fromDbMap).toList();
+        _unread = unread;
         _loading  = false;
       });
     }
@@ -133,6 +149,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
       separatorBuilder: (_, __) => const SizedBox(height: 8),
       itemBuilder: (ctx, i) {
         final c = _contacts[i];
+        final unread = _unread[c.userId] ?? 0;
         return ListTile(
           leading: CircleAvatar(
             backgroundColor: cs.primary.withOpacity(0.15),
@@ -149,11 +166,34 @@ class _ContactsScreenState extends State<ContactsScreen> {
             c.shortId,
             style: GoogleFonts.robotoMono(fontSize: 10, color: Colors.white38),
           ),
-          trailing: c.verified
-              ? Icon(Icons.verified_rounded, color: cs.primary, size: 18)
-              : Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 18),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (unread > 0)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: cs.primary,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    unread > 99 ? '99+' : unread.toString(),
+                    style: GoogleFonts.inter(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w800,
+                      color: const Color(0xFF0A0B0D),
+                    ),
+                  ),
+                ),
+              if (unread > 0) const SizedBox(width: 10),
+              c.verified
+                  ? Icon(Icons.verified_rounded, color: cs.primary, size: 18)
+                  : Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 18),
+            ],
+          ),
           tileColor: const Color(0xFF111318),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          onLongPress: () => _editContactName(ctx, c),
           onTap: () => Navigator.push(
             ctx,
             MaterialPageRoute(builder: (_) => ChatScreen(contact: c)),
@@ -161,6 +201,55 @@ class _ContactsScreenState extends State<ContactsScreen> {
         ).animate().fadeIn(delay: Duration(milliseconds: i * 50)).slideX(begin: 0.05);
       },
     );
+  }
+
+  Future<void> _editContactName(BuildContext context, GhostContact c) async {
+    final controller = TextEditingController(text: c.nickname ?? '');
+    final cs = Theme.of(context).colorScheme;
+
+    final result = await showDialog<String?>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF111318),
+        title: Text('Edit contact name', style: GoogleFonts.inter(fontWeight: FontWeight.w700)),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: GoogleFonts.inter(color: Colors.white),
+          decoration: InputDecoration(
+            hintText: 'Nickname (optional)',
+            hintStyle: GoogleFonts.inter(color: Colors.white38),
+            enabledBorder: OutlineInputBorder(
+              borderSide: BorderSide(color: cs.primary.withOpacity(0.25)),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderSide: BorderSide(color: cs.primary.withOpacity(0.6)),
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, null),
+            child: Text('Cancel', style: GoogleFonts.inter(color: Colors.white70)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ''),
+            child: Text('Clear', style: GoogleFonts.inter(color: cs.error)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: cs.primary, foregroundColor: const Color(0xFF0A0B0D)),
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: Text('Save', style: GoogleFonts.inter(fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+
+    if (result == null) return; // cancel
+    await _db.updateContactNickname(c.userId, result);
+    await _loadContacts();
   }
 
   void _showAddContactSheet() {

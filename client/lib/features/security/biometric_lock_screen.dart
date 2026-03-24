@@ -1,6 +1,7 @@
 // lib/features/security/biometric_lock_screen.dart
 // Full-screen gate shown when biometric lock is enabled. Authenticate on launch/resume.
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../core/security/app_security_service.dart';
@@ -25,27 +26,43 @@ class _BiometricLockScreenState extends State<BiometricLockScreen> {
       _authenticating = true;
       _error = null;
     });
-    try {
-      final success = await _security.authenticate(
-        reason: 'Unlock Ghost to continue',
-        useErrorDialogs: false,
-      );
-      if (success && mounted) {
-        widget.onUnlocked();
-      } else if (mounted) {
-        setState(() {
-          _authenticating = false;
-          _error = 'Authentication failed. Try again.';
-        });
-      }
-    } catch (_) {
-      if (mounted) {
-        setState(() {
-          _authenticating = false;
-          _error = 'Authentication failed. Try again.';
-        });
-      }
+    final outcome = await _security.authenticateOutcome(
+      reason: 'Unlock Ghost to continue',
+      useErrorDialogs: false,
+    );
+    if (!mounted) return;
+
+    if (kDebugMode) debugPrint('[BiometricLockScreen] Auth outcome: $outcome');
+
+    if (outcome == AuthOutcome.success) {
+      widget.onUnlocked();
+      return;
     }
+
+    setState(() {
+      _authenticating = false;
+      switch (outcome) {
+        case AuthOutcome.notEnrolled:
+        case AuthOutcome.noCredentials:
+        case AuthOutcome.passcodeNotSet:
+          _error = 'No biometrics/PIN enrolled in system settings.';
+          break;
+        case AuthOutcome.lockedOut:
+          _error = 'Biometric temporarily locked. Try again later.';
+          break;
+        case AuthOutcome.permanentlyLockedOut:
+          _error = 'Biometric locked. Unlock device with PIN/password, then retry.';
+          break;
+        case AuthOutcome.notAvailable:
+          _error = 'Biometric not available on this device.';
+          break;
+        case AuthOutcome.cancelledOrFailed:
+        case AuthOutcome.error:
+        case AuthOutcome.success:
+          _error = 'Authentication cancelled. Try again.';
+          break;
+      }
+    });
   }
 
   @override

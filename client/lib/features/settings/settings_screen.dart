@@ -58,6 +58,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
 
+    // Some devices report "supported" but have no enrolled biometrics.
+    if (val) {
+      final types = await _localAuth.getAvailableBiometrics();
+      if (types.isEmpty) {
+        if (mounted) {
+          setState(() => _biometricLock = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No biometrics enrolled. Add fingerprint/face/PIN in system settings.')),
+          );
+        }
+        return;
+      }
+    }
+
     // If enabling, trigger biometric authentication immediately
     if (val) {
       try {
@@ -65,26 +79,54 @@ class _SettingsScreenState extends State<SettingsScreen> {
         // (MIUI cancels biometric if called immediately after camera/navigation)
         await Future.delayed(const Duration(milliseconds: 300));
 
-        final success = await _security.authenticate(
+        final outcome = await _security.authenticateOutcome(
           reason: 'Set up biometric lock for Ghost',
           useErrorDialogs: true,
         );
 
-        if (mounted) {
-          if (success) {
-            // User authenticated, enable the feature
+        if (!mounted) return;
+
+        switch (outcome) {
+          case AuthOutcome.success:
             await _security.setBiometricLockEnabled(true);
             setState(() => _biometricLock = true);
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('Biometric lock enabled')),
             );
-          } else {
-            // Authentication failed or cancelled, don't enable
+            return;
+          case AuthOutcome.notEnrolled:
+          case AuthOutcome.noCredentials:
+          case AuthOutcome.passcodeNotSet:
             setState(() => _biometricLock = false);
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Biometric authentication cancelled')),
+              const SnackBar(content: Text('No biometrics/PIN enrolled. Enable it in system settings.')),
             );
-          }
+            return;
+          case AuthOutcome.lockedOut:
+            setState(() => _biometricLock = false);
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Biometric temporarily locked. Try again later.')),
+            );
+            return;
+          case AuthOutcome.permanentlyLockedOut:
+            setState(() => _biometricLock = false);
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Biometric locked. Unlock your device with PIN/password and try again.')),
+            );
+            return;
+          case AuthOutcome.notAvailable:
+            setState(() => _biometricLock = false);
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Biometric not available on this device')),
+            );
+            return;
+          case AuthOutcome.cancelledOrFailed:
+          case AuthOutcome.error:
+            setState(() => _biometricLock = false);
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Authentication cancelled')),
+            );
+            return;
         }
       } catch (e) {
         if (mounted) {

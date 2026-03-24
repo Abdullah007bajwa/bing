@@ -14,7 +14,7 @@ import 'package:path/path.dart' as path;
 
 const _kDbKeyStorageKey = 'ghost_db_encryption_key';
 const _kDbFileName      = 'ghost.db';
-const _kDbVersion       = 2;
+const _kDbVersion       = 4;
 
 class SecureDb {
   static final SecureDb _instance = SecureDb._();
@@ -66,7 +66,11 @@ class SecureDb {
         created_at      INTEGER NOT NULL, -- unix timestamp ms
         delete_at       INTEGER,          -- unix timestamp ms; null = read-triggered
         view_once       INTEGER NOT NULL DEFAULT 0,
-        status          INTEGER NOT NULL DEFAULT 1
+        status          INTEGER NOT NULL DEFAULT 1,
+        decrypt_pending       INTEGER NOT NULL DEFAULT 0,
+        decrypt_attempts      INTEGER NOT NULL DEFAULT 0,
+        last_decrypt_error    TEXT,
+        decrypt_permanent_fail INTEGER NOT NULL DEFAULT 0
       )
     ''');
 
@@ -102,6 +106,24 @@ class SecureDb {
       )
     ''');
 
+    // Signal prekey material (PRIVATE, stored encrypted by SQLCipher)
+    // These records are required to decrypt incoming PreKeySignalMessages.
+    batch.execute('''
+      CREATE TABLE signal_prekeys (
+        key_id          INTEGER PRIMARY KEY,
+        record_b64      TEXT NOT NULL,   -- base64 PreKeyRecord.serialize()
+        created_at      INTEGER NOT NULL
+      )
+    ''');
+
+    batch.execute('''
+      CREATE TABLE signal_signed_prekeys (
+        key_id          INTEGER PRIMARY KEY,
+        record_b64      TEXT NOT NULL,   -- base64 SignedPreKeyRecord.serialize()
+        created_at      INTEGER NOT NULL
+      )
+    ''');
+
     // Panic codes (PBKDF2 hash only — never stored in plaintext)
     batch.execute('''
       CREATE TABLE panic_config (
@@ -118,6 +140,31 @@ class SecureDb {
   Future<void> _upgradeSchema(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
       await db.execute('ALTER TABLE messages ADD COLUMN status INTEGER NOT NULL DEFAULT 1');
+    }
+    if (oldVersion < 3) {
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS signal_prekeys (
+          key_id          INTEGER PRIMARY KEY,
+          record_b64      TEXT NOT NULL,
+          created_at      INTEGER NOT NULL
+        )
+      ''');
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS signal_signed_prekeys (
+          key_id          INTEGER PRIMARY KEY,
+          record_b64      TEXT NOT NULL,
+          created_at      INTEGER NOT NULL
+        )
+      ''');
+    }
+    if (oldVersion < 4) {
+      await db.execute(
+          'ALTER TABLE messages ADD COLUMN decrypt_pending INTEGER NOT NULL DEFAULT 0');
+      await db.execute(
+          'ALTER TABLE messages ADD COLUMN decrypt_attempts INTEGER NOT NULL DEFAULT 0');
+      await db.execute('ALTER TABLE messages ADD COLUMN last_decrypt_error TEXT');
+      await db.execute(
+          'ALTER TABLE messages ADD COLUMN decrypt_permanent_fail INTEGER NOT NULL DEFAULT 0');
     }
   }
 
@@ -150,14 +197,53 @@ class SecureDb {
     );
   }
 
+  Future<Map<String, dynamic>?> getMessageById(String messageId) async {
+    final d = await db;
+    final rows = await d.query(
+      'messages',
+      where: 'id = ?',
+      whereArgs: [messageId],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first;
+  }
+
   Future<void> markMessageRead(String messageId) async {
     final d = await db;
     await d.update(
       'messages',
-      {'is_read': 1, 'delete_at': DateTime.now().millisecondsSinceEpoch + 5000, 'status': 3},
+      {'is_read': 1, 'status': 3},
       where: 'id = ?',
       whereArgs: [messageId],
     );
+  }
+
+  Future<void> markConversationRead(String conversationId) async {
+    final d = await db;
+    await d.update(
+      'messages',
+      {'is_read': 1, 'status': 3},
+      where: 'conversation_id = ? AND is_read = 0',
+      whereArgs: [conversationId],
+    );
+  }
+
+  Future<Map<String, int>> getUnreadCountsByConversation() async {
+    final d = await db;
+    final rows = await d.rawQuery('''
+      SELECT conversation_id, COUNT(*) as c
+      FROM messages
+      WHERE is_read = 0
+      GROUP BY conversation_id
+    ''');
+    final out = <String, int>{};
+    for (final r in rows) {
+      final cid = r['conversation_id'] as String?;
+      final c = r['c'];
+      if (cid == null) continue;
+      out[cid] = (c is int) ? c : int.tryParse('$c') ?? 0;
+    }
+    return out;
   }
 
   Future<void> updateMessageStatus(String messageId, int status) async {
@@ -168,6 +254,57 @@ class SecureDb {
       where: 'id = ?',
       whereArgs: [messageId],
     );
+  }
+
+  /// Incoming ciphertext rows awaiting decrypt (excludes own sends and permanent failures).
+  Future<List<Map<String, dynamic>>> getPendingDecryptMessages(
+    String conversationId,
+    String myUserId, {
+    int maxAttempts = 50,
+  }) async {
+    final d = await db;
+    return d.query(
+      'messages',
+      where:
+          'conversation_id = ? AND sender_id != ? AND decrypt_pending = 1 AND decrypt_permanent_fail = 0 AND decrypt_attempts < ?',
+      whereArgs: [conversationId, myUserId, maxAttempts],
+      orderBy: 'created_at ASC',
+    );
+  }
+
+  Future<void> updateMessageDecryptState(
+    String messageId, {
+    required int decryptPending,
+    required int decryptAttempts,
+    String? lastDecryptError,
+    required int decryptPermanentFail,
+  }) async {
+    final d = await db;
+    await d.update(
+      'messages',
+      {
+        'decrypt_pending': decryptPending,
+        'decrypt_attempts': decryptAttempts,
+        'last_decrypt_error': lastDecryptError,
+        'decrypt_permanent_fail': decryptPermanentFail,
+      },
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+  }
+
+  /// True if any conversation still has pending decrypt work.
+  Future<bool> hasAnyPendingDecrypt(String myUserId) async {
+    final d = await db;
+    final rows = await d.rawQuery(
+      '''
+      SELECT 1 FROM messages
+      WHERE sender_id != ? AND decrypt_pending = 1 AND decrypt_permanent_fail = 0
+      LIMIT 1
+      ''',
+      [myUserId],
+    );
+    return rows.isNotEmpty;
   }
 
   /// Delete messages whose delete_at timestamp has passed
@@ -202,6 +339,17 @@ class SecureDb {
   Future<void> deleteContact(String userId) async {
     final d = await db;
     await d.delete('contacts', where: 'user_id = ?', whereArgs: [userId]);
+  }
+
+  Future<void> updateContactNickname(String userId, String? nickname) async {
+    final d = await db;
+    final trimmed = nickname?.trim();
+    await d.update(
+      'contacts',
+      {'nickname': (trimmed == null || trimmed.isEmpty) ? null : trimmed},
+      where: 'user_id = ?',
+      whereArgs: [userId],
+    );
   }
 
   // ── Group keys ────────────────────────────────────────────────────────────
@@ -246,6 +394,57 @@ class SecureDb {
     final d    = await db;
     final rows = await d.query('session_states', where: 'address = ?', whereArgs: [address]);
     return rows.isEmpty ? null : rows.first['session_b64'] as String?;
+  }
+
+  /// Delete a persisted Signal ratchet session by its store address key.
+  /// Address format is expected to match `_persistSession()` in `SignalSessionService`:
+  /// `"$contactUserId.$deviceId"`.
+  Future<void> deleteSessionState(String address) async {
+    final d = await db;
+    await d.delete('session_states', where: 'address = ?', whereArgs: [address]);
+  }
+
+  // ── Signal prekey material (private) ──────────────────────────────────────
+  Future<void> storeSignalPreKeyRecord(int keyId, String recordB64) async {
+    final d = await db;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await d.insert('signal_prekeys', {
+      'key_id': keyId,
+      'record_b64': recordB64,
+      'created_at': now,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<String?> loadSignalPreKeyRecord(int keyId) async {
+    final d = await db;
+    final rows = await d.query('signal_prekeys', where: 'key_id = ?', whereArgs: [keyId], limit: 1);
+    return rows.isEmpty ? null : rows.first['record_b64'] as String?;
+  }
+
+  Future<List<Map<String, dynamic>>> loadAllSignalPreKeyRecords() async {
+    final d = await db;
+    return d.query('signal_prekeys', orderBy: 'key_id ASC');
+  }
+
+  Future<void> deleteSignalPreKeyRecord(int keyId) async {
+    final d = await db;
+    await d.delete('signal_prekeys', where: 'key_id = ?', whereArgs: [keyId]);
+  }
+
+  Future<void> storeSignalSignedPreKeyRecord(int keyId, String recordB64) async {
+    final d = await db;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await d.insert('signal_signed_prekeys', {
+      'key_id': keyId,
+      'record_b64': recordB64,
+      'created_at': now,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<String?> loadSignalSignedPreKeyRecord(int keyId) async {
+    final d = await db;
+    final rows = await d.query('signal_signed_prekeys', where: 'key_id = ?', whereArgs: [keyId], limit: 1);
+    return rows.isEmpty ? null : rows.first['record_b64'] as String?;
   }
 
   // ── Panic Wipe ────────────────────────────────────────────────────────────

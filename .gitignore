@@ -18,6 +18,7 @@ client/**/*.log
 # Secrets (CRITICAL)
 client/.env
 server/.env
+client/tool
 *.key
 *.pem
 *.p8

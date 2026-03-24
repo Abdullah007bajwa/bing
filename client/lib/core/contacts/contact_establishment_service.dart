@@ -59,7 +59,7 @@ class ContactEstablishmentService {
       'id':          msgId,
       'to':          contact.userId,
       'ciphertext':  encrypted['ciphertext'],
-      'msg_type':    encrypted['type'] == 1 ? 'prekey' : 'signal',
+      'msg_type':    encrypted['type'] == 3 ? 'prekey' : 'signal',
       'ttl_seconds': AppConfig.defaultTtlSeconds,
     });
 

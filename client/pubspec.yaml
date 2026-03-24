@@ -44,6 +44,7 @@ dependencies:
   # ── Device Security ──────────────────────────────────────────────────────────
   flutter_windowmanager: ^0.2.0        # FLAG_SECURE — block screenshots (Android)
   local_auth: ^2.3.0                   # Biometric lock (Android / iOS)
+  flutter_ringtone_player: ^4.0.0+4    # Play system notification sounds (Android/iOS)
 
   # ── State Management ─────────────────────────────────────────────────────────
   flutter_bloc: ^8.1.6

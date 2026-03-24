@@ -4,12 +4,12 @@
 // Handles failures gracefully with retries
 
 import 'dart:async';
-import 'dart:math';
 import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 import '../identity/identity_service.dart';
 import '../crypto/signal_key_service.dart';
 import '../crypto/signal_keys_upload_service.dart';
+import '../crypto/prekey_management_service.dart';
 import '../../relay/relay_auth_service.dart';
 import '../../relay/relay_coordinator.dart';
 import '../../relay/websocket_client.dart';
@@ -33,6 +33,7 @@ class AppInitializationService {
   final _identityService = IdentityService();
   final _signalKeyService = SignalKeyService();
   final _signalUploadService = SignalKeysUploadService();
+  final _prekeyService = PrekeyManagementService();
   final _relayAuthService = RelayAuthService();
   final _relayClient = GhostRelayClient();
 
@@ -45,12 +46,14 @@ class AppInitializationService {
 
   bool _isInitialized = false;
   bool get isInitialized => _isInitialized;
+  bool _signedPreKeyEnsuredThisRun = false;
 
   /// Run complete initialization sequence
   /// Returns true if successful, false if failed
   Future<bool> initialize() async {
     try {
       _isInitialized = false;
+      _signedPreKeyEnsuredThisRun = false;
 
       // Step 1: Check for existing keys
       _updateStep(InitializationStep.checkExistingKeys);
@@ -66,7 +69,24 @@ class AppInitializationService {
         if (kDebugMode) {
           debugPrint('[AppInit] Using existing keys');
         }
-        // Keys exist, skip to relay connection
+        final userId = await _identityService.getUserId();
+
+        // Migration: older installs may have the flag but not the signed-prekey record.
+        try {
+          await _ensureSignedPreKeyOnce(identityKeyPair: existingKeyPair);
+        } catch (_) {}
+
+        // Migration: ensure local private prekeys exist and top up Supabase if needed.
+        await _prekeyService.ensureLocalPrekeysAndUpload(userId: userId);
+
+        // Always upsert identity/signed-prekey on launch.
+        // This is safe and idempotent: local keys never change after first init
+        // (guarded by areSignalKeysInitialized), so the same bytes are written every time.
+        // Skipping the upload risks Supabase having stale/incorrect keys if external
+        // resets happened, which breaks session establishment for all senders.
+        try {
+          await _uploadKeysToSupabase(userId: userId, identityKeyPair: existingKeyPair);
+        } catch (_) {}
         return await _connectToRelay();
       }
 
@@ -77,7 +97,7 @@ class AppInitializationService {
       }
 
       final identityKeyPair = await _identityService.generateIdentityKeyPair();
-      await _signalKeyService.initializeSignalKeys();
+      await _signalKeyService.initializeSignalKeys(identityKeyPair: identityKeyPair);
 
       if (kDebugMode) {
         debugPrint('[AppInit] Keys generated successfully');
@@ -139,15 +159,11 @@ class AppInitializationService {
     const maxRetries = 3;
     for (int attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-      // Get registration ID from Signal store
-        // Use empty identity for temporary store to get default registration ID
-        final registrationId = _getRandomRegistrationId();
-
-        // Generate signed prekey for upload
-        final signedPreKeyPair = Curve.generateKeyPair();
-        final signedPreKeySignature = Curve.calculateSignature(
-          identityKeyPair.getPrivateKey(),
-          signedPreKeyPair.publicKey.serialize(),
+        final registrationId = await _signalKeyService.getRegistrationId();
+        // Always verify/regenerate the local SignedPreKeyRecord so it matches
+        // the identity that is being uploaded to Supabase.
+        final signedPreKey = await _ensureSignedPreKeyOnce(
+          identityKeyPair: identityKeyPair,
         );
 
         // Upload identity key + signed prekey
@@ -155,9 +171,9 @@ class AppInitializationService {
           userId: userId,
           identityKeyPair: identityKeyPair,
           registrationId: registrationId,
-          signedPreKeyPair: signedPreKeyPair,
-          signedPreKeyId: 1,
-          signedPreKeySignature: signedPreKeySignature,
+          signedPreKeyPair: signedPreKey.getKeyPair(),
+          signedPreKeyId: signedPreKey.id,
+          signedPreKeySignature: signedPreKey.signature,
         );
 
         if (success) {
@@ -176,6 +192,21 @@ class AppInitializationService {
       }
     }
     return false;
+  }
+
+  Future<SignedPreKeyRecord> _ensureSignedPreKeyOnce({
+    required IdentityKeyPair identityKeyPair,
+  }) async {
+    if (_signedPreKeyEnsuredThisRun) {
+      final existing = await _signalKeyService.loadSignedPreKeyRecord();
+      if (existing != null) return existing;
+    }
+    final ensured = await _signalKeyService.ensureSignedPreKeyRecord(
+      identityKeyPair: identityKeyPair,
+      keyId: 1,
+    );
+    _signedPreKeyEnsuredThisRun = true;
+    return ensured;
   }
 
   /// Connect to relay with signed handshake
@@ -209,7 +240,7 @@ class AppInitializationService {
 
       // Connect to relay
       await _relayClient.connect(
-        relayUrl: 'wss://bing-2iqr.onrender.com/ws',
+        relayUrl: AppConfig.relayWssUrl,
         userId: userId,
       );
 
@@ -250,9 +281,5 @@ class AppInitializationService {
     _stepStream.close();
   }
 
-  /// Generate random registration ID (0-16383)
-  int _getRandomRegistrationId() {
-    return Random().nextInt(16384);
-  }
 }
 

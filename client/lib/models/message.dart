@@ -20,6 +20,12 @@ class GhostMessage {
   final bool isRead;
   final MessageStatus status;
   final String? mediaType;       // 'image' | 'video' | null (text only)
+  /// 1 = ciphertext not yet decrypted successfully (incoming from relay).
+  final int decryptPending;
+  final int decryptAttempts;
+  final String? lastDecryptError;
+  /// 1 = duplicate/consumed prekey etc.; do not retry blindly.
+  final int decryptPermanentFail;
 
   const GhostMessage({
     required this.id,
@@ -35,6 +41,10 @@ class GhostMessage {
     this.isRead           = false,
     this.status           = MessageStatus.sending,
     this.mediaType,
+    this.decryptPending = 0,
+    this.decryptAttempts = 0,
+    this.lastDecryptError,
+    this.decryptPermanentFail = 0,
   });
 
   Map<String, dynamic> toDbMap() => {
@@ -50,6 +60,10 @@ class GhostMessage {
     'delete_at':       deleteAt,
     'view_once':       viewOnce ? 1 : 0,
     'status':          status.index,
+    'decrypt_pending':      decryptPending,
+    'decrypt_attempts':     decryptAttempts,
+    'last_decrypt_error':   lastDecryptError,
+    'decrypt_permanent_fail': decryptPermanentFail,
   };
 
   factory GhostMessage.fromDbMap(Map<String, dynamic> m) => GhostMessage(
@@ -65,6 +79,10 @@ class GhostMessage {
     deleteAt:       m['delete_at'] as int?,
     viewOnce:      (m['view_once'] as int) == 1,
     status:         MessageStatus.values[m['status'] as int? ?? 1],
+    decryptPending: (m['decrypt_pending'] as int?) ?? 0,
+    decryptAttempts: (m['decrypt_attempts'] as int?) ?? 0,
+    lastDecryptError: m['last_decrypt_error'] as String?,
+    decryptPermanentFail: (m['decrypt_permanent_fail'] as int?) ?? 0,
   );
 
   Map<String, dynamic> toRelayPacket(String toUserId) => {
@@ -75,7 +93,15 @@ class GhostMessage {
     'msg_type':    msgType.index == 0 ? 'prekey' : (msgType == MessageType.group ? 'group' : 'signal'),
   };
 
-  GhostMessage copyWith({MessageStatus? status, bool? isRead, int? deleteAt}) =>
+  GhostMessage copyWith({
+    MessageStatus? status,
+    bool? isRead,
+    int? deleteAt,
+    int? decryptPending,
+    int? decryptAttempts,
+    String? lastDecryptError,
+    int? decryptPermanentFail,
+  }) =>
     GhostMessage(
       id:             id,
       conversationId: conversationId,
@@ -90,5 +116,9 @@ class GhostMessage {
       isRead:         isRead  ?? this.isRead,
       status:         status  ?? this.status,
       mediaType:      mediaType,
+      decryptPending: decryptPending ?? this.decryptPending,
+      decryptAttempts: decryptAttempts ?? this.decryptAttempts,
+      lastDecryptError: lastDecryptError ?? this.lastDecryptError,
+      decryptPermanentFail: decryptPermanentFail ?? this.decryptPermanentFail,
     );
 }

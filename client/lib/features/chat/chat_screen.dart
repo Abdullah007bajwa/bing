@@ -5,6 +5,7 @@
 // Screenshot blocked app-wide (FLAG_SECURE / screen_protector).
 
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -13,10 +14,14 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 import 'package:uuid/uuid.dart';
 import '../../core/crypto/signal_session.dart';
+import '../../core/crypto/signal_session_builder.dart';
+import '../../core/crypto/signal_keys_upload_service.dart';
+import '../../core/crypto/decrypt_failure.dart';
 import '../../core/crypto/base64_util.dart';
 import '../../core/storage/secure_db.dart';
 import '../../core/storage/ephemeral_cache.dart';
 import '../../core/identity/identity_service.dart';
+import '../../core/crypto/signal_key_service.dart';
 import '../../relay/relay_coordinator.dart';
 import '../../relay/websocket_client.dart';
 import '../../models/contact.dart';
@@ -32,12 +37,15 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  static const int _maxDecryptAttempts = 50;
+
   final _composeController = TextEditingController();
   final _scrollController  = ScrollController();
   final _db       = SecureDb();
   final _cache    = EphemeralCache();
   final _coordinator = RelayCoordinator();
   final _signal   = SignalSessionService();
+  final _signalKeys = SignalKeyService();
   final _identity = IdentityService();
   final _uuid     = const Uuid();
 
@@ -66,8 +74,13 @@ class _ChatScreenState extends State<ChatScreen> {
     _myUserId = await _identity.getUserId();
     if (kp == null || !mounted) return;
 
-    // Initialize Signal store (in-memory; session record loaded from SQLCipher below)
-    _signalStore = InMemorySignalProtocolStore(kp, 1);
+    final regId = await _signalKeys.getRegistrationId();
+    print("[DEBUG] receiver known identity: ${base64Encode(kp.getPublicKey().publicKey.serialize())}");
+    print("[DEBUG] receiver registrationId: $regId");
+    
+    // Initialize Signal store (in-memory; we hydrate private prekeys/signed-prekey from SQLCipher/secure storage)
+    _signalStore = InMemorySignalProtocolStore(kp, regId);
+    await _signalKeys.hydrateStore(_signalStore);
 
     // Load persisted session so ratchet state survives navigation (Bug 2 fix)
     final address = SignalProtocolAddress(widget.contact.userId, 1);
@@ -75,7 +88,14 @@ class _ChatScreenState extends State<ChatScreen> {
     if (sessionB64 != null && sessionB64.isNotEmpty) {
       try {
         final record = SessionRecord.fromSerialized(safeBase64Decode(sessionB64));
-        await _signalStore.storeSession(address, record);
+        // Only restore if the session is established (has a valid sender ratchet key).
+        // A fresh/empty session would cause AssertionError(InvalidKeyException) on encrypt.
+        if (record.sessionState.hasSenderChain()) {
+          await _signalStore.storeSession(address, record);
+        } else {
+          // Stale empty session — clear it so JIT build creates a clean one
+          await _db.storeSessionState('${widget.contact.userId}.1', '');
+        }
       } catch (_) {
         // Stale or corrupt session — will build new session below
       }
@@ -99,24 +119,9 @@ class _ChatScreenState extends State<ChatScreen> {
     // Load saved messages
     var rows = await _db.getMessages(widget.contact.userId);
     _messages = rows.map(GhostMessage.fromDbMap).toList();
+    await _db.markConversationRead(widget.contact.userId);
 
-    // Re-decrypt only received messages (we can't decrypt our own sent messages with the session)
-    for (final msg in _messages) {
-      if (_cache.getMessage(msg.id) != null) continue;
-      if (msg.senderId == _myUserId) continue; // sent by me: plaintext only in cache; keep cache across navigations
-      try {
-        final typeInt = msg.msgType == MessageType.preKey ? 3 : 2;
-        final normalized = {'type': typeInt, 'ciphertext': msg.ciphertext, 'ttl_seconds': msg.ttlSeconds};
-        final plaintext = await _signal.decryptMessage(
-          cipher: _cipher!,
-          packet: normalized,
-          store: _signalStore,
-          contactUserId: widget.contact.userId,
-          deviceId: 1,
-        );
-        _cache.cacheMessage(msg.id, plaintext, ttl: Duration(seconds: msg.ttlSeconds > 0 ? msg.ttlSeconds : 3600));
-      } catch (_) { /* skip undecryptable or wrong session */ }
-    }
+    await _drainPendingDecrypts();
 
     if (!mounted) return;
 
@@ -124,33 +129,61 @@ class _ChatScreenState extends State<ChatScreen> {
     final buffered = _coordinator.getBufferedPackets(widget.contact.userId);
     for (final packet in buffered) {
       try {
-        final msgType = packet['msg_type'];
-        final typeInt = msgType == 'prekey' ? 3 : 2;
-        final normalized = Map<String, dynamic>.from(packet)..['type'] = typeInt;
-        final plaintext = await _signal.decryptMessage(
-          cipher: _cipher!,
-          packet: normalized,
-          store: _signalStore,
-          contactUserId: widget.contact.userId,
-          deviceId: 1,
-        );
-        final now = DateTime.now().millisecondsSinceEpoch;
-        final msg = GhostMessage(
-          id:             _uuid.v4(),
-          conversationId: widget.contact.userId,
-          senderId:       widget.contact.userId,
-          ciphertext:     packet['ciphertext'] as String,
-          msgType:        MessageType.signal,
-          createdAt:      now,
-          ttlSeconds:    packet['ttl_seconds'] as int? ?? _ttlSeconds,
-          viewOnce:       packet['view_once'] as bool? ?? false,
-          status:         MessageStatus.delivered,
-        );
-        _cache.cacheMessage(msg.id, plaintext, ttl: Duration(seconds: msg.ttlSeconds));
-        await _db.insertMessage(msg.toDbMap());
-        await _db.markMessageRead(msg.id);
-        _messages.add(msg);
-      } catch (_) { /* skip undecryptable */ }
+        if (packet['type'] == 'receipt' || packet['receipt'] == 'read') {
+          final msgId = packet['msg_id'] as String?;
+          if (msgId == null || msgId.isEmpty) continue;
+          await _db.updateMessageStatus(msgId, MessageStatus.read.index);
+          if (mounted) {
+            setState(() {
+              final idx = _messages.indexWhere((m) => m.id == msgId);
+              if (idx != -1) {
+                _messages[idx] = _messages[idx].copyWith(status: MessageStatus.read);
+              }
+            });
+          }
+          continue;
+        }
+        if (_packetIsSessionReset(packet)) {
+          await _handlePeerSessionReset();
+          continue;
+        }
+        final ciphertext = packet['ciphertext'] as String?;
+        if (ciphertext == null || ciphertext.isEmpty) continue;
+
+        final packetId = (packet['id'] as String?)?.trim() ?? '';
+        Map<String, dynamic>? row;
+        if (packetId.isNotEmpty) {
+          row = await _db.getMessageById(packetId);
+        }
+        GhostMessage? target =
+            row != null ? GhostMessage.fromDbMap(row) : null;
+        if (target == null) {
+          final msgType = packet['msg_type'];
+          final typeInt = (msgType == 'prekey' || msgType == 0) ? 3 : 2;
+          final now = DateTime.now().millisecondsSinceEpoch;
+          final msgId = packetId.isNotEmpty ? packetId : _uuid.v4();
+          target = GhostMessage(
+            id: msgId,
+            conversationId: widget.contact.userId,
+            senderId: widget.contact.userId,
+            ciphertext: ciphertext,
+            msgType: typeInt == 3 ? MessageType.preKey : MessageType.signal,
+            createdAt: now,
+            ttlSeconds: packet['ttl_seconds'] as int? ?? _ttlSeconds,
+            viewOnce: packet['view_once'] as bool? ?? false,
+            status: MessageStatus.delivered,
+            decryptPending: 1,
+            decryptAttempts: 0,
+          );
+          await _db.insertMessage(target.toDbMap());
+        }
+        final ok = await _decryptAndSettleOnce(target, markReadOnSuccess: false);
+        if (ok) await _drainPendingDecrypts();
+      } catch (e) {
+        if (mounted) {
+          debugPrint('[Chat] Buffered packet failed id ${packet['id']}: $e');
+        }
+      }
     }
 
     if (!mounted) return;
@@ -182,6 +215,171 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollToBottom();
   }
 
+  bool _packetIsSessionReset(Map<String, dynamic> packet) {
+    final mt = packet['msg_type'];
+    if (mt is String && mt == 'session_reset') return true;
+    return packet['type'] == 'session_reset';
+  }
+
+  Future<void> _mergeMessageFromDb(String messageId) async {
+    final row = await _db.getMessageById(messageId);
+    if (row == null || !mounted) return;
+    final gm = GhostMessage.fromDbMap(row);
+    setState(() {
+      final idx = _messages.indexWhere((m) => m.id == messageId);
+      if (idx == -1) {
+        final list = [..._messages, gm]
+          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+        _messages = list;
+      } else {
+        _messages = List<GhostMessage>.from(_messages)..[idx] = gm;
+      }
+    });
+  }
+
+  /// Drain pending decrypts in DB order; one success may unlock the next ratchet step.
+  Future<void> _drainPendingDecrypts() async {
+    if (!mounted || _cipher == null) return;
+    while (mounted && _cipher != null) {
+      final rows = await _db.getPendingDecryptMessages(
+        widget.contact.userId,
+        _myUserId,
+        maxAttempts: _maxDecryptAttempts,
+      );
+      if (rows.isEmpty) break;
+      var progressed = false;
+      for (final row in rows) {
+        final msg = GhostMessage.fromDbMap(row);
+        if (await _decryptAndSettleOnce(msg, markReadOnSuccess: false)) {
+          progressed = true;
+          break;
+        }
+      }
+      if (!progressed) break;
+    }
+  }
+
+  Future<bool> _decryptAndSettleOnce(
+    GhostMessage msg, {
+    required bool markReadOnSuccess,
+  }) async {
+    final cipher = _cipher;
+    if (cipher == null || !mounted) return false;
+    if (msg.senderId == _myUserId) return false;
+    if (msg.decryptPermanentFail == 1) return false;
+
+    if (_cache.getMessage(msg.id) != null) {
+      if (msg.decryptPending == 1) {
+        await _db.updateMessageDecryptState(
+          msg.id,
+          decryptPending: 0,
+          decryptAttempts: msg.decryptAttempts,
+          lastDecryptError: null,
+          decryptPermanentFail: 0,
+        );
+        await _mergeMessageFromDb(msg.id);
+      }
+      return false;
+    }
+
+    final nextAttempts = msg.decryptAttempts + 1;
+    if (nextAttempts > _maxDecryptAttempts) {
+      await _db.updateMessageDecryptState(
+        msg.id,
+        decryptPending: 0,
+        decryptAttempts: nextAttempts,
+        lastDecryptError: 'max_decrypt_attempts',
+        decryptPermanentFail: 0,
+      );
+      await _mergeMessageFromDb(msg.id);
+      return false;
+    }
+
+    final typeInt = msg.msgType == MessageType.preKey ? 3 : 2;
+    final normalized = {
+      'type': typeInt,
+      'ciphertext': msg.ciphertext,
+      'ttl_seconds': msg.ttlSeconds,
+    };
+
+    try {
+      final plaintext = await _signal.decryptMessage(
+        cipher: cipher,
+        packet: normalized,
+        store: _signalStore,
+        contactUserId: widget.contact.userId,
+        deviceId: 1,
+      );
+      await _db.updateMessageDecryptState(
+        msg.id,
+        decryptPending: 0,
+        decryptAttempts: nextAttempts,
+        lastDecryptError: null,
+        decryptPermanentFail: 0,
+      );
+      _cache.cacheMessage(
+        msg.id,
+        plaintext,
+        ttl: Duration(seconds: msg.ttlSeconds > 0 ? msg.ttlSeconds : 3600),
+      );
+      if (markReadOnSuccess) {
+        await _db.updateMessageStatus(msg.id, MessageStatus.read.index);
+        _sendReadReceipt(msg.id, msg.senderId);
+      }
+      await _mergeMessageFromDb(msg.id);
+      return true;
+    } on DecryptException catch (e) {
+      final perm = e.permanentFailure ? 1 : 0;
+      final pending = (e.retryLater && perm == 0) ? 1 : 0;
+      await _db.updateMessageDecryptState(
+        msg.id,
+        decryptPending: pending,
+        decryptAttempts: nextAttempts,
+        lastDecryptError: e.message,
+        decryptPermanentFail: perm,
+      );
+      await _mergeMessageFromDb(msg.id);
+      return false;
+    } catch (e) {
+      await _db.updateMessageDecryptState(
+        msg.id,
+        decryptPending: 1,
+        decryptAttempts: nextAttempts,
+        lastDecryptError: e.toString(),
+        decryptPermanentFail: 0,
+      );
+      await _mergeMessageFromDb(msg.id);
+      return false;
+    }
+  }
+
+  Future<void> _handlePeerSessionReset() async {
+    if (_cipher == null || !mounted) return;
+    try {
+      await _signal.clearSessionForPeer(
+        store: _signalStore,
+        contactUserId: widget.contact.userId,
+      );
+      final builder = SignalSessionBuilder(
+        store: _signalStore,
+        keysService: SignalKeysUploadService(),
+      );
+      await builder.buildSession(
+        recipientUserId: widget.contact.userId,
+        deviceId: 1,
+      );
+      _cipher = await _signal.getOrCreateSession(
+        contactUserId: widget.contact.userId,
+        contactPublicKeyB64: widget.contact.publicKeyB64,
+        store: _signalStore,
+        deviceId: 1,
+      );
+      await _drainPendingDecrypts();
+    } catch (e) {
+      if (kDebugMode) debugPrint('[Chat] Peer session_reset handling failed: $e');
+    }
+  }
+
   // ── Incoming encrypted packet ───────────────────────────────────────
   Future<void> _onIncomingPacket(Map<String, dynamic> packet) async {
     if (_cipher == null || !mounted) return;
@@ -202,59 +400,53 @@ class _ChatScreenState extends State<ChatScreen> {
         return;
       }
 
-      final msgType = packet['msg_type'];
-      final typeInt = (msgType == 'prekey' || msgType == 0) ? 3 : 2;
-      final normalized = Map<String, dynamic>.from(packet)..['type'] = typeInt;
-
-      final plaintext = await _signal.decryptMessage(
-        cipher: _cipher!,
-        packet: normalized,
-        store: _signalStore,
-        contactUserId: widget.contact.userId,
-        deviceId: 1,
-      );
-      final now       = DateTime.now().millisecondsSinceEpoch;
-      final incomingId = (packet['id'] as String?)?.trim();
-      final msg       = GhostMessage(
-        // Preserve sender-chosen packet id so receipts can reference it
-        id:             (incomingId != null && incomingId.isNotEmpty) ? incomingId : _uuid.v4(),
-        conversationId: widget.contact.userId,
-        senderId:       widget.contact.userId,
-        ciphertext:     packet['ciphertext'] as String,
-        msgType:        MessageType.signal,
-        createdAt:      now,
-        ttlSeconds:     packet['ttl_seconds'] as int? ?? _ttlSeconds,
-        viewOnce:       packet['view_once'] as bool? ?? false,
-        status:         MessageStatus.delivered,
-      );
-
-      // Cache decrypted plaintext in RAM (never write to DB)
-      _cache.cacheMessage(msg.id, plaintext,
-          ttl: Duration(seconds: msg.ttlSeconds));
-
-      // Persist only ciphertext to SQLCipher
-      await _db.insertMessage(msg.toDbMap());
-      await _db.markMessageRead(msg.id);
-
-      // Send read receipt back to sender (no plaintext; metadata only)
-      final to = packet['from'] as String?;
-      if (to != null && to.isNotEmpty && _relay.isConnected) {
-        _relay.sendPacket({
-          'type':    'receipt',
-          'id':      _uuid.v4(), // unique nonce for replay protection
-          'to':      to,
-          'receipt': 'read',
-          'msg_id':  msg.id,
-          'ttl_seconds': 3600,
-        });
+      if (_packetIsSessionReset(packet)) {
+        await _handlePeerSessionReset();
+        return;
       }
 
-      if (!mounted) return;
+      final ciphertext = packet['ciphertext'] as String?;
+      if (ciphertext == null || ciphertext.isEmpty) return;
 
-      setState(() => _messages.add(msg));
-      _scrollToBottom();
-  } catch (e) {
-      if (kDebugMode) debugPrint('[Chat] Decrypt failed (session/PreKey/Signal?): $e');
+      final incomingId = (packet['id'] as String?)?.trim() ?? '';
+      Map<String, dynamic>? row;
+      if (incomingId.isNotEmpty) {
+        row = await _db.getMessageById(incomingId);
+      }
+      GhostMessage? target =
+          row != null ? GhostMessage.fromDbMap(row) : null;
+      if (target == null) {
+        final msgType = packet['msg_type'];
+        final typeInt = (msgType == 'prekey' || msgType == 0) ? 3 : 2;
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final msgId = incomingId.isNotEmpty ? incomingId : _uuid.v4();
+        target = GhostMessage(
+          id: msgId,
+          conversationId: widget.contact.userId,
+          senderId: widget.contact.userId,
+          ciphertext: ciphertext,
+          msgType: typeInt == 3 ? MessageType.preKey : MessageType.signal,
+          createdAt: now,
+          ttlSeconds: packet['ttl_seconds'] as int? ?? _ttlSeconds,
+          viewOnce: packet['view_once'] as bool? ?? false,
+          status: MessageStatus.delivered,
+          decryptPending: 1,
+          decryptAttempts: 0,
+        );
+        await _db.insertMessage(target.toDbMap());
+      }
+
+      final ok =
+          await _decryptAndSettleOnce(target, markReadOnSuccess: true);
+      if (ok) {
+        await _drainPendingDecrypts();
+        _scrollToBottom();
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[Chat] Incoming packet handling failed: $e');
+        debugPrint('[Chat] Packet: $packet');
+      }
     }
   }
 
@@ -296,6 +488,18 @@ class _ChatScreenState extends State<ChatScreen> {
         store: _signalStore,
         contactUserId: widget.contact.userId,
         deviceId: 1,
+        onBeforeSessionRebuild: () {
+          _coordinator.sendSessionResetIfAllowed(
+            fromUserId: _myUserId,
+            toUserId: widget.contact.userId,
+          );
+        },
+      );
+      _cipher = await _signal.getOrCreateSession(
+        contactUserId: widget.contact.userId,
+        contactPublicKeyB64: widget.contact.publicKeyB64,
+        store: _signalStore,
+        deviceId: 1,
       );
     } catch (e) {
       if (kDebugMode) debugPrint('[Chat] Encrypt failed: $e');
@@ -314,7 +518,9 @@ class _ChatScreenState extends State<ChatScreen> {
       conversationId: widget.contact.userId,
       senderId:       _myUserId,
       ciphertext:     encrypted['ciphertext'] as String,
-      msgType:        encrypted['type'] == 1 ? MessageType.preKey : MessageType.signal,
+      // libsignal_protocol_dart ciphertext.getType():
+      // 3 = PREKEY_TYPE (PreKeySignalMessage), 2 = WHISPER_TYPE (SignalMessage)
+      msgType:        encrypted['type'] == 3 ? MessageType.preKey : MessageType.signal,
       createdAt:      now,
       ttlSeconds:     _ephemeralEnabled ? _ttlSeconds : 0,
       status:         MessageStatus.sending,
@@ -342,7 +548,7 @@ class _ChatScreenState extends State<ChatScreen> {
       'to':          recipientId,
       'from':        _myUserId,
       'ciphertext':  ciphertext,
-      'msg_type':    encrypted['type'] == 1 ? 'prekey' : 'signal',
+      'msg_type':    encrypted['type'] == 3 ? 'prekey' : 'signal',
       'ttl_seconds': _ttlSeconds,
       'timestamp':   now,
     };
@@ -359,6 +565,19 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       });
     }
+  }
+
+  void _sendReadReceipt(String messageId, String senderId) {
+    if (!_relay.isConnected) return;
+    final packet = {
+      'type': 'receipt',
+      'receipt': 'read',
+      'msg_id': messageId,
+      'from': _myUserId,
+      'to': senderId,
+      'id': _uuid.v4(),
+    };
+    _relay.sendPacket(packet);
   }
 
   Future<void> _purgeExpired() async {
@@ -384,6 +603,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _coordinator.setCurrentChat(null, null);
+    _signal.evictSession(widget.contact.userId);
     _purgeTimer?.cancel();
     _composeController.dispose();
     _scrollController.dispose();
@@ -459,77 +679,104 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _buildBubble(GhostMessage msg) {
     final isMe      = msg.senderId == _myUserId;
-    final plaintext = _cache.getMessage(msg.id) ?? '🔒 [encrypted]';
+    final cached = _cache.getMessage(msg.id);
+    final plaintext = cached ??
+        (isMe ? '[Encrypted — not in memory]' : '[Tap to decrypt]');
     final cs        = Theme.of(context).colorScheme;
 
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.72),
-        decoration: BoxDecoration(
-          gradient: isMe
-              ? LinearGradient(
-                  colors: [cs.primary, const Color(0xFF6C63FF)],
-                  begin:  Alignment.topLeft,
-                  end:    Alignment.bottomRight,
-                )
-              : null,
-          color: isMe ? null : const Color(0xFF1C1F27),
-          borderRadius: BorderRadius.only(
-            topLeft:     const Radius.circular(18),
-            topRight:    const Radius.circular(18),
-            bottomLeft:  Radius.circular(isMe ? 18 : 4),
-            bottomRight: Radius.circular(isMe ? 4  : 18),
+      child: GestureDetector(
+        onTap: (!isMe && cached == null) ? () => _decryptForDisplay(msg) : null,
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.72),
+          decoration: BoxDecoration(
+            gradient: isMe
+                ? LinearGradient(
+                    colors: [cs.primary, const Color(0xFF6C63FF)],
+                    begin:  Alignment.topLeft,
+                    end:    Alignment.bottomRight,
+                  )
+                : null,
+            color: isMe ? null : const Color(0xFF1C1F27),
+            borderRadius: BorderRadius.only(
+              topLeft:     const Radius.circular(18),
+              topRight:    const Radius.circular(18),
+              bottomLeft:  Radius.circular(isMe ? 18 : 4),
+              bottomRight: Radius.circular(isMe ? 4  : 18),
+            ),
           ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              plaintext,
-              style: GoogleFonts.inter(
-                fontSize: 14,
-                color:    isMe ? Colors.black : Colors.white,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (msg.isEphemeral)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 4),
-                    child: Icon(Icons.timer_rounded,
-                        size: 10, color: isMe ? Colors.black54 : Colors.white30),
-                  ),
-                Text(
-                  _formatTime(msg.createdAt),
-                  style: GoogleFonts.inter(
-                    fontSize: 10,
-                    color: isMe ? Colors.black54 : Colors.white30,
-                  ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                plaintext,
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  color:    isMe ? Colors.black : Colors.white,
                 ),
-                if (isMe) ...[
-                  const SizedBox(width: 4),
-                  Icon(
-                    msg.status == MessageStatus.sending
-                        ? Icons.access_time_rounded
-                        : (msg.status == MessageStatus.read || msg.status == MessageStatus.delivered)
-                            ? Icons.done_all_rounded
-                            : Icons.check_rounded,
-                    size:  12,
-                    color: Colors.black54,
+              ),
+              const SizedBox(height: 4),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (msg.isEphemeral)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 4),
+                      child: Icon(Icons.timer_rounded,
+                          size: 10, color: isMe ? Colors.black54 : Colors.white30),
+                    ),
+                  Text(
+                    _formatTime(msg.createdAt),
+                    style: GoogleFonts.inter(
+                      fontSize: 10,
+                      color: isMe ? Colors.black54 : Colors.white30,
+                    ),
                   ),
+                  if (isMe) ...[
+                    const SizedBox(width: 4),
+                    Icon(
+                      msg.status == MessageStatus.sending
+                          ? Icons.access_time_rounded
+                          : (msg.status == MessageStatus.read || msg.status == MessageStatus.delivered)
+                              ? Icons.done_all_rounded
+                              : Icons.check_rounded,
+                      size:  12,
+                      color: Colors.black54,
+                    ),
+                  ],
                 ],
-              ],
-            ),
-          ],
-        ),
-      ).animate().fadeIn(duration: 200.ms).slideY(begin: 0.1),
+              ),
+            ],
+          ),
+        ).animate().fadeIn(duration: 200.ms).slideY(begin: 0.1),
+      ),
     );
+  }
+
+  Future<void> _decryptForDisplay(GhostMessage msg) async {
+    try {
+      if (_cipher == null) return;
+      final ok = await _decryptAndSettleOnce(msg, markReadOnSuccess: true);
+      if (ok) {
+        await _drainPendingDecrypts();
+        return;
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not decrypt message')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not decrypt message')),
+        );
+      }
+    }
   }
 
   Widget _buildComposeBar(ColorScheme cs) {

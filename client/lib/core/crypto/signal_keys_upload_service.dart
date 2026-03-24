@@ -172,6 +172,11 @@ class SignalKeysUploadService {
           .select()
           .eq('user_id', recipientUserId)
           .filter('used_at', 'is', null)
+          // Prefer the newest unused prekey. If older prekeys were lost
+          // locally (e.g., device storage wipe without server cleanup),
+          // using the newest reduces the chance of selecting a prekey the
+          // receiver cannot decrypt.
+          .order('key_id', ascending: false)
           .limit(1)
           .maybeSingle();
 
@@ -216,6 +221,22 @@ class SignalKeysUploadService {
       if (kDebugMode) {
         debugPrint('[SignalKeysUpload] Error marking prekey as used: $e');
       }
+    }
+  }
+
+  /// Check if a signed prekey exists in Supabase for this user.
+  /// Used to detect when external DB resets require a re-upload.
+  Future<bool> signedPreKeyExists({required String userId}) async {
+    try {
+      final resp = await _supabase
+          .from('signed_prekeys')
+          .select('key_id')
+          .eq('user_id', userId)
+          .limit(1)
+          .maybeSingle();
+      return resp != null;
+    } catch (_) {
+      return false; // If we can't check, assume missing → force upload
     }
   }
 

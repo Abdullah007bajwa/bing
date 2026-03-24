@@ -2,6 +2,8 @@
 // Ghost — Military-grade private messaging.
 // Entry point: security flags (screenshot block always on), services, onboarding or home.
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' as foundation show debugPrint;
 import 'package:flutter/services.dart';
@@ -11,6 +13,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'core/identity/identity_service.dart';
 import 'core/security/app_security_service.dart';
 import 'core/storage/ephemeral_cache.dart';
+import 'core/storage/secure_db.dart';
+import 'core/crypto/signal_session.dart';
 import 'core/push/push_service.dart';
 import 'core/crypto/prekey_management_service.dart';
 import 'features/onboarding/onboarding_screen.dart';
@@ -100,6 +104,7 @@ class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
   bool _locked = true;
   bool _biometricEnabled = false;
   bool _checkedBiometric = false;
+  DateTime _lastUnlockTime = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
   void initState() {
@@ -141,7 +146,34 @@ class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
   }
 
   void _onUnlocked() {
-    if (mounted) setState(() => _locked = false);
+    if (mounted) {
+      setState(() {
+        _locked = false;
+        _lastUnlockTime = DateTime.now();
+      });
+    }
+  }
+
+  /// Clears in-memory [SessionCipher] cache unless SQLCipher still has ciphertext
+  /// rows awaiting decrypt — then keep cache so a resumed chat can reuse warm state.
+  Future<void> _evictSessionCachesIfIdle() async {
+    try {
+      final uid = await IdentityService().getUserId();
+      if (uid.isEmpty) {
+        SignalSessionService().evictAllSessions();
+        return;
+      }
+      final pending = await SecureDb().hasAnyPendingDecrypt(uid);
+      if (pending) {
+        foundation.debugPrint(
+            '[Main] Session cache eviction skipped: pending decrypt messages');
+        return;
+      }
+      SignalSessionService().evictAllSessions();
+    } catch (e) {
+      foundation.debugPrint('[Main] _evictSessionCachesIfIdle: $e');
+      SignalSessionService().evictAllSessions();
+    }
   }
 
   @override
@@ -149,10 +181,16 @@ class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       EphemeralCache().clear();
+      unawaited(_evictSessionCachesIfIdle());
     }
     if (state == AppLifecycleState.resumed) {
       AppSecurityService().enforceScreenshotProtection();
-      if (_biometricEnabled && mounted) setState(() => _locked = true);
+      if (_biometricEnabled && mounted) {
+        // Prevent instant re-lock if we just returned from the OS biometric prompt
+        if (DateTime.now().difference(_lastUnlockTime).inSeconds > 2) {
+          setState(() => _locked = true);
+        }
+      }
     }
   }
 
@@ -167,19 +205,13 @@ class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
         ),
       );
     }
-    if (_locked && _biometricEnabled) {
-      return MaterialApp(
-        debugShowCheckedModeBanner: false,
-        theme: _buildTheme(),
-        home: BiometricLockScreen(onUnlocked: _onUnlocked),
-      );
-    }
     return MaterialApp(
       title: 'Ghost',
       debugShowCheckedModeBanner: false,
       theme: _buildTheme(),
-      // Use AuthGate to safely determine landing screen based on session/state
-      home: AuthGate(isNewUser: widget.isNewUser),
+      home: _locked && _biometricEnabled
+          ? BiometricLockScreen(key: const ValueKey('lock'), onUnlocked: _onUnlocked)
+          : AuthGate(key: const ValueKey('gate'), isNewUser: widget.isNewUser),
       routes: {
         '/onboarding': (_) => const OnboardingScreen(),
         '/home':       (_) => const ContactsScreen(),

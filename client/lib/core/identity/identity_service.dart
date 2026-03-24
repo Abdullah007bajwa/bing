@@ -65,8 +65,27 @@ class IdentityService {
     final pubKey  = IdentityKey(
       Curve.decodePoint(base64Decode(pubKeyB64), 0),
     );
-    _cachedKeyPair = IdentityKeyPair(pubKey, privKey);
-    _cachedUserId  = await _secureStorage.read(key: _kUserIdStorageKey);
+    final loadedKeyPair = IdentityKeyPair(pubKey, privKey);
+    final storedUserId = await _secureStorage.read(key: _kUserIdStorageKey);
+    final derivedUserId = _deriveUserId(loadedKeyPair.getPublicKey());
+
+    // Hard consistency guard: if stored user id diverges from the currently
+    // loaded identity keypair, we must not continue with corrupted identity
+    // state (would publish invalid identity/signed-prekey linkage).
+    if (storedUserId != null &&
+        storedUserId.isNotEmpty &&
+        storedUserId != derivedUserId) {
+      _cachedKeyPair = null;
+      _cachedUserId = null;
+      await _secureStorage.deleteAll();
+      throw StateError(
+        'Identity mismatch detected. Stored user id does not match loaded identity key.',
+      );
+    }
+
+    _cachedKeyPair = loadedKeyPair;
+    _cachedUserId  = derivedUserId;
+    await _secureStorage.write(key: _kUserIdStorageKey, value: derivedUserId);
     return _cachedKeyPair;
   }
 

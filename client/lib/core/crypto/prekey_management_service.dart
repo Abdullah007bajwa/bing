@@ -3,9 +3,11 @@
 // Maintains at least 50 keys, refills when count drops below 10
 
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
 import 'package:libsignal_protocol_dart/libsignal_protocol_dart.dart';
 import 'signal_keys_upload_service.dart';
+import '../storage/secure_db.dart';
 
 class PrekeyManagementService {
   static final PrekeyManagementService _instance =
@@ -14,11 +16,42 @@ class PrekeyManagementService {
   PrekeyManagementService._();
 
   final _keysUploadService = SignalKeysUploadService();
+  final _db = SecureDb();
   Timer? _rotationTimer;
 
   static const int _targetPrekeyCount = 50;
   static const int _refillThreshold = 10;
   static const int _rotationIntervalHours = 24;
+
+  /// Ensure this device has local private prekeys stored (SQLCipher) and that
+  /// Supabase has enough public prekeys available for others to initiate sessions.
+  /// This is a migration helper for existing installs that previously never persisted prekeys.
+  Future<void> ensureLocalPrekeysAndUpload({required String userId}) async {
+    try {
+      final localRows = await _db.loadAllSignalPreKeyRecords();
+      final localCount = localRows.length;
+      var maxId = 0;
+      for (final r in localRows) {
+        final id = r['key_id'];
+        if (id is int && id > maxId) maxId = id;
+      }
+
+      if (localCount >= _targetPrekeyCount) return;
+
+      final toGenerate = _targetPrekeyCount - localCount;
+      final startId = (maxId > 0) ? (maxId + 1) : 1;
+
+      if (kDebugMode) {
+        debugPrint('[PrekeyManagement] Local prekeys missing; generating $toGenerate (start $startId)');
+      }
+
+      await _keysUploadService.ensureUserExists(userId);
+      final newPreKeys = await generateOneTimePreKeys(startId: startId, count: toGenerate);
+      await _keysUploadService.uploadOneTimePreKeys(userId: userId, preKeys: newPreKeys);
+    } catch (e) {
+      if (kDebugMode) debugPrint('[PrekeyManagement] ensureLocalPrekeysAndUpload error: $e');
+    }
+  }
 
   /// Start background prekey rotation task
   /// Call this once during app initialization
@@ -124,6 +157,10 @@ class PrekeyManagementService {
         final keyId = startId + i;
         final keyPair = Curve.generateKeyPair();
         preKeys.add(MapEntry(keyId, keyPair));
+
+        // Persist the private prekey locally (SQLCipher) so we can decrypt incoming PreKeySignalMessages.
+        final record = PreKeyRecord(keyId, keyPair);
+        await _db.storeSignalPreKeyRecord(keyId, base64Encode(record.serialize()));
       }
 
       if (kDebugMode) {
