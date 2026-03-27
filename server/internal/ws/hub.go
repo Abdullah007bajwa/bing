@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ghostmsg/relay/internal/model"
+	"github.com/ghostmsg/relay/internal/push"
 	"github.com/ghostmsg/relay/internal/redisstore"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
@@ -20,7 +21,7 @@ import (
 
 // Client represents a connected Ghost user.
 type Client struct {
-	ID   string          // user_id (base58 SHA-256 of pubkey) — set from URL param
+	ID   string // user_id (base58 SHA-256 of pubkey) — set from URL param
 	Conn *websocket.Conn
 	Send chan []byte
 	Hub  *Hub
@@ -39,15 +40,17 @@ type Hub struct {
 	unregister chan *Client
 	relay      chan model.Envelope
 	store      *redisstore.Store
+	pusher     *push.FCM
 }
 
-func NewHub(store *redisstore.Store) *Hub {
+func NewHub(store *redisstore.Store, pusher *push.FCM) *Hub {
 	return &Hub{
 		clients:    make(map[string]*Client),
 		register:   make(chan *Client, 64),
 		unregister: make(chan *Client, 64),
 		relay:      make(chan model.Envelope, 512),
 		store:      store,
+		pusher:     pusher,
 	}
 }
 
@@ -125,11 +128,21 @@ func (h *Hub) route(env model.Envelope) {
 			// Recipient's send buffer full — store in Redis
 			_ = h.store.Store(context.Background(), env.Packet.To, delivery.ID, data, ttl)
 			log.Info().Str("from", env.SenderID).Str("to", env.Packet.To).Str("pkt_id", env.Packet.ID).Msg("recipient buffer full, stored pending")
+			if h.pusher != nil && env.Packet.Type != "receipt" {
+				if tok, err := h.store.GetDeviceToken(context.Background(), env.Packet.To); err == nil && tok != "" {
+					_ = h.pusher.SendNewMessage(context.Background(), tok, env.SenderID)
+				}
+			}
 		}
 	} else {
 		// Offline — store encrypted packet in Redis with TTL
 		_ = h.store.Store(context.Background(), env.Packet.To, delivery.ID, data, ttl)
 		log.Info().Str("from", env.SenderID).Str("to", env.Packet.To).Str("pkt_id", env.Packet.ID).Msg("recipient offline, stored pending")
+		if h.pusher != nil && env.Packet.Type != "receipt" {
+			if tok, err := h.store.GetDeviceToken(context.Background(), env.Packet.To); err == nil && tok != "" {
+				_ = h.pusher.SendNewMessage(context.Background(), tok, env.SenderID)
+			}
+		}
 	}
 }
 
@@ -296,7 +309,7 @@ func (h *Hub) HandleClient(c *Client) {
 		if ttl <= 0 || ttl > 24*time.Hour {
 			ttl = 24 * time.Hour
 		}
-		
+
 		isNew, err := h.store.CheckReplay(ctx, pkt.ID, ttl)
 		if err != nil || !isNew {
 			log.Warn().Str("user", c.ID[:8]).Str("pkt", pkt.ID).Msg("replay detected, dropping packet")

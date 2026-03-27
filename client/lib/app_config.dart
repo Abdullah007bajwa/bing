@@ -10,6 +10,8 @@ class AppConfig {
   /// WSS URL of the Go relay. Must end with /ws. Server requires ?uid=<ghost_id> (client adds it).
   static String get relayWssUrl =>
       dotenv.env['RELAY_WSS_URL'] ?? 'wss://bing-2iqr.onrender.com/ws';
+  static String get relayApiUrl =>
+      dotenv.env['RELAY_API_URL'] ?? 'https://bing-2iqr.onrender.com';
 
   // ── Supabase ───────────────────────────────────────────────────────────────
   /// Supabase project URL

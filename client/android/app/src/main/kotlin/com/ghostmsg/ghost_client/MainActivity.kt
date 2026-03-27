@@ -1,4 +1,4 @@
-package com.ghostmsg.ghost_client
+package com.vexa.app
 
 import io.flutter.embedding.android.FlutterFragmentActivity
 

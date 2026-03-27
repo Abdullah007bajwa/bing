@@ -226,6 +226,8 @@ class RelayCoordinator {
         nickname:     null,
         verified:     false,
         addedAt:      now,
+        lastMessageAt: null,
+        chatTtlSeconds: 3600,
       );
       await _db.upsertContact(contact.toDbMap());
     } catch (_) {

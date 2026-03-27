@@ -1,63 +1,161 @@
-// lib/core/push/push_service.dart
-// Handles opaque encrypted push notifications.
-// Unlike standard apps, Ghost pushes NEVER contain message content or sender info.
-// They are simply "wake up" signals. The OS wakes the app, and the app
-// connects to the WSS relay to securely fetch its pending packets.
-
-import 'dart:developer';
+import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
-import '../../relay/websocket_client.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:http/http.dart' as http;
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import '../../app_config.dart';
 import '../identity/identity_service.dart';
+
+const AndroidNotificationChannel _kGhostNotificationsChannel =
+    AndroidNotificationChannel(
+  'vexa_messages',
+  'Vexa Messages',
+  description: 'Encrypted message notifications',
+  importance: Importance.high,
+);
+
+final FlutterLocalNotificationsPlugin _kLocalNotifications =
+    FlutterLocalNotificationsPlugin();
+
+final StreamController<String> _tapSenderController =
+    StreamController<String>.broadcast();
+
+Future<void> ghostFirebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp();
+}
 
 class PushService {
   static final PushService _instance = PushService._internal();
   factory PushService() => _instance;
   PushService._internal();
 
-  /// Represents an APNS/FCM device token
   String? _deviceToken;
+  String? get deviceToken => _deviceToken;
+  Stream<String> get tappedSenderIds => _tapSenderController.stream;
 
-  /// Call this when the app starts to register for push notifications.
-  /// (Implementation requires Firebase/APNS setup in OS developer portals)
   Future<void> initialize() async {
     if (kIsWeb) return;
-    
-    // In a production environment:
-    // 1. Request permissions from OS
-    // 2. Fetch APNS/FCM token
-    // 3. Send securely to a push-distributor server (NOT the relay)
-    
-    _deviceToken = "mock_device_token_awaiting_apns";
-    log('PushService initialized. App will wake silently on encrypted pushes.');
+    await Firebase.initializeApp();
+    FirebaseMessaging.onBackgroundMessage(ghostFirebaseMessagingBackgroundHandler);
+    await _initLocalNotifications();
+    await _requestPermissions();
+    await _refreshAndRegisterToken();
+    FirebaseMessaging.instance.onTokenRefresh.listen((token) {
+      _deviceToken = token;
+      unawaited(_registerTokenWithRelay(token));
+    });
+    FirebaseMessaging.onMessage.listen(_onForegroundMessage);
+    FirebaseMessaging.onMessageOpenedApp.listen(_onMessageOpened);
+    final initial = await FirebaseMessaging.instance.getInitialMessage();
+    if (initial != null) _onMessageOpened(initial);
   }
 
-  /// Called by the OS push handler when a background data message arrives.
-  /// Payload must be purely opaque, e.g., {"type": "ghost_wakeup"}
-  Future<void> handleBackgroundMessage(Map<String, dynamic> data) async {
-    if (data['type'] != 'ghost_wakeup') {
-      log('Ignored non-wakeup push payload');
-      return;
-    }
-
-    log('Received encrypted wakeup push. Connecting to relay to fetch data...');
-    
-    // Wake up the WebSocket client to pull down Redis offline messages
-    // The websocket client handles decryption and saving to SQLCipher
-    final wsClient = GhostRelayClient();
-    final userId = await IdentityService().getUserId();
-
-    // Wait for it to connect, drain the offline queue, and disconnect
-    // (In background execution, OS usually gives ~30 seconds for this)
-    await wsClient.connect(
-      relayUrl: AppConfig.relayWssUrl,
-      userId: userId,
+  Future<void> _initLocalNotifications() async {
+    const android = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const ios = DarwinInitializationSettings();
+    const settings = InitializationSettings(android: android, iOS: ios);
+    await _kLocalNotifications.initialize(
+      settings,
+      onDidReceiveNotificationResponse: (resp) {
+        final sender = resp.payload;
+        if (sender != null && sender.isNotEmpty) {
+          _tapSenderController.add(sender);
+        }
+      },
     );
+    await _kLocalNotifications
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(_kGhostNotificationsChannel);
+  }
 
-    // Wait a brief moment to allow queue draining before OS kills background process
-    await Future.delayed(const Duration(seconds: 15));
-    wsClient.disconnect();
-    
-    log('Wakeup cycle complete. Offline messages synced to secure local DB.');
+  Future<void> _requestPermissions() async {
+    await FirebaseMessaging.instance.requestPermission(
+      alert: true,
+      badge: true,
+      sound: true,
+      announcement: false,
+      criticalAlert: false,
+      provisional: false,
+      carPlay: false,
+    );
+    await _kLocalNotifications
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.requestNotificationsPermission();
+  }
+
+  Future<void> _refreshAndRegisterToken() async {
+    final token = await FirebaseMessaging.instance.getToken();
+    if (token == null || token.isEmpty) return;
+    _deviceToken = token;
+    await _registerTokenWithRelay(token);
+  }
+
+  Future<void> _registerTokenWithRelay(String token) async {
+    final userId = await IdentityService().getUserId();
+    if (userId.isEmpty) return;
+    final uri = Uri.parse('${AppConfig.relayApiUrl}/register_device');
+    try {
+      await http.post(
+        uri,
+        headers: {'content-type': 'application/json'},
+        body: jsonEncode({
+          'user_id': userId,
+          'fcm_token': token,
+          'platform': defaultTargetPlatform.name,
+        }),
+      );
+    } catch (e) {
+      if (kDebugMode) debugPrint('[Push] register token failed: $e');
+    }
+  }
+
+  Future<void> _onForegroundMessage(RemoteMessage message) async {
+    final sender = _extractSenderId(message);
+    final title = message.notification?.title ??
+        _shortSender(sender) ??
+        'Vexa';
+    const body = 'New message';
+    final details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _kGhostNotificationsChannel.id,
+        _kGhostNotificationsChannel.name,
+        channelDescription: _kGhostNotificationsChannel.description,
+        importance: Importance.high,
+        priority: Priority.high,
+        ticker: 'ticker',
+      ),
+      iOS: const DarwinNotificationDetails(),
+    );
+    await _kLocalNotifications.show(
+      DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      title,
+      body,
+      details,
+      payload: sender,
+    );
+  }
+
+  void _onMessageOpened(RemoteMessage message) {
+    final sender = _extractSenderId(message);
+    if (sender != null && sender.isNotEmpty) {
+      _tapSenderController.add(sender);
+    }
+  }
+
+  String? _extractSenderId(RemoteMessage message) {
+    final fromData = message.data['sender_id']?.toString().trim();
+    if (fromData != null && fromData.isNotEmpty) return fromData;
+    final fromNotif = message.notification?.title?.trim();
+    if (fromNotif != null && fromNotif.isNotEmpty) return fromNotif;
+    return null;
+  }
+
+  String? _shortSender(String? sender) {
+    if (sender == null || sender.isEmpty) return null;
+    return sender.length <= 12 ? sender : sender.substring(0, 12);
   }
 }

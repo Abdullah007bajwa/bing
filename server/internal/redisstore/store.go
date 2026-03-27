@@ -16,9 +16,14 @@ import (
 )
 
 const keyPrefix = "ghost:pending:"
+const deviceTokenPrefix = "ghost:device:"
 
 func pendingKey(userID string) string {
 	return fmt.Sprintf("%s%s", keyPrefix, userID)
+}
+
+func deviceKey(userID string) string {
+	return fmt.Sprintf("%s%s", deviceTokenPrefix, userID)
 }
 
 type Store struct {
@@ -30,9 +35,9 @@ func NewStore(redisURL string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("redis URL parse: %w", err)
 	}
-	opt.MaxRetries    = 5
-	opt.DialTimeout  = 5 * time.Second
-	opt.ReadTimeout  = 3 * time.Second
+	opt.MaxRetries = 5
+	opt.DialTimeout = 5 * time.Second
+	opt.ReadTimeout = 3 * time.Second
 	opt.WriteTimeout = 3 * time.Second
 
 	rdb := redis.NewClient(opt)
@@ -89,6 +94,24 @@ func (s *Store) DeleteAll(ctx context.Context, userID string) error {
 	return s.rdb.Del(ctx, key).Err()
 }
 
+func (s *Store) RegisterDeviceToken(ctx context.Context, userID, token string, ttl time.Duration) error {
+	if userID == "" || token == "" {
+		return nil
+	}
+	if ttl <= 0 {
+		ttl = 30 * 24 * time.Hour
+	}
+	return s.rdb.Set(ctx, deviceKey(userID), token, ttl).Err()
+}
+
+func (s *Store) GetDeviceToken(ctx context.Context, userID string) (string, error) {
+	v, err := s.rdb.Get(ctx, deviceKey(userID)).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	return v, err
+}
+
 // ── Relay Hardening (Phase 4) ───────────────────────────────────────────────
 
 // CheckReplay uses SETNX to ensure a packet ID hasn't been seen recently.
@@ -98,7 +121,7 @@ func (s *Store) CheckReplay(ctx context.Context, packetID string, ttl time.Durat
 		return false, nil // reject packets without nonce
 	}
 	key := fmt.Sprintf("ghost:nonce:%s", packetID)
-	
+
 	// SETNX returns true if key was set (new packet), false if it existed (replay)
 	return s.rdb.SetNX(ctx, key, "1", ttl).Result()
 }
@@ -133,15 +156,15 @@ func (s *Store) AllowRateLimit(ctx context.Context, userID string, capacity int,
 		end
 		return 0
 	`
-	
+
 	now := time.Now().Unix()
 	key := fmt.Sprintf("ghost:ratelimit:%s", userID)
-	
+
 	val, err := s.rdb.Eval(ctx, script, []string{key}, capacity, ratePerMin, now).Result()
 	if err != nil {
 		return false, err
 	}
-	
+
 	return val.(int64) == 1, nil
 }
 

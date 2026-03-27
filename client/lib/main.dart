@@ -17,8 +17,10 @@ import 'core/storage/secure_db.dart';
 import 'core/crypto/signal_session.dart';
 import 'core/push/push_service.dart';
 import 'core/crypto/prekey_management_service.dart';
+import 'models/contact.dart';
 import 'features/onboarding/onboarding_screen.dart';
 import 'features/contacts/contacts_screen.dart';
+import 'features/chat/chat_screen.dart';
 import 'core/auth/auth_gate.dart';
 import 'features/security/biometric_lock_screen.dart';
 import 'app_config.dart';
@@ -101,6 +103,7 @@ class GhostApp extends StatefulWidget {
 }
 
 class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
+  final GlobalKey<NavigatorState> _navKey = GlobalKey<NavigatorState>();
   bool _locked = true;
   bool _biometricEnabled = false;
   bool _checkedBiometric = false;
@@ -112,6 +115,7 @@ class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _checkBiometricAndUnlock();
     _startBackgroundTasks();
+    _bindPushNotificationTaps();
   }
 
   Future<void> _startBackgroundTasks() async {
@@ -124,6 +128,27 @@ class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
     } catch (e) {
       foundation.debugPrint('[Main] Failed to start background tasks: $e');
     }
+  }
+
+  void _bindPushNotificationTaps() {
+    PushService().tappedSenderIds.listen((senderId) {
+      unawaited(_openChatFromPush(senderId));
+    });
+  }
+
+  Future<void> _openChatFromPush(String senderId) async {
+    final sender = senderId.trim();
+    if (sender.isEmpty) return;
+    final row = await SecureDb().getContact(sender);
+    if (row == null) {
+      _navKey.currentState?.pushNamed('/home');
+      return;
+    }
+    final contact = GhostContact.fromDbMap(row);
+    _navKey.currentState?.pushNamed('/home');
+    _navKey.currentState?.push(
+      MaterialPageRoute(builder: (_) => ChatScreen(contact: contact)),
+    );
   }
 
   @override
@@ -206,8 +231,9 @@ class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
       );
     }
     return MaterialApp(
-      title: 'Ghost',
+      title: 'Vexa',
       debugShowCheckedModeBanner: false,
+      navigatorKey: _navKey,
       theme: _buildTheme(),
       home: _locked && _biometricEnabled
           ? BiometricLockScreen(key: const ValueKey('lock'), onUnlocked: _onUnlocked)

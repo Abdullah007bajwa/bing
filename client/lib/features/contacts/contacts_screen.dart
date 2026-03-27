@@ -84,7 +84,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           children: [
             Icon(Icons.shield_rounded, color: cs.primary, size: 20),
             const SizedBox(width: 8),
-            const Text('Ghost'),
+            const Text('Vexa'),
           ],
         ),
         actions: [
@@ -197,7 +197,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           onTap: () => Navigator.push(
             ctx,
             MaterialPageRoute(builder: (_) => ChatScreen(contact: c)),
-          ),
+          ).then((_) => _loadContacts()),
         ).animate().fadeIn(delay: Duration(milliseconds: i * 50)).slideX(begin: 0.05);
       },
     );

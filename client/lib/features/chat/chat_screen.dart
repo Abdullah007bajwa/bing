@@ -113,6 +113,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
     if (!mounted) return;
 
+    final contactRow = await _db.getContact(widget.contact.userId);
+    final storedTtl = (contactRow?['chat_ttl_seconds'] as int?) ?? AppConfig.defaultTtlSeconds;
+    _ephemeralEnabled = storedTtl > 0;
+    _ttlSeconds = (storedTtl > 0 ? storedTtl : AppConfig.defaultTtlSeconds)
+        .clamp(300, AppConfig.maxTtlSeconds);
+
+    if (!mounted) return;
+
     // Load saved messages
     var rows = await _db.getMessages(widget.contact.userId);
     _messages = rows.map(GhostMessage.fromDbMap).toList();
@@ -646,7 +654,7 @@ class _ChatScreenState extends State<ChatScreen> {
       'from':        _myUserId,
       'ciphertext':  ciphertext,
       'msg_type':    encrypted['type'] == 3 ? 'prekey' : 'signal',
-      'ttl_seconds': _ttlSeconds,
+      'ttl_seconds': msg.ttlSeconds,
       'timestamp':   now,
     };
     final sent = _relay.sendPacket(packet);
@@ -749,14 +757,13 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
         actions: [
-          // Ephemeral timer toggle
           IconButton(
             icon: Icon(
               _ephemeralEnabled ? Icons.timer_rounded : Icons.timer_off_rounded,
               color: _ephemeralEnabled ? cs.primary : Colors.white30,
             ),
-            onPressed: () => setState(() => _ephemeralEnabled = !_ephemeralEnabled),
-            tooltip: 'Ephemeral messages',
+            onPressed: _openTimerPicker,
+            tooltip: 'Disappearing timer',
           ),
         ],
       ),
@@ -931,6 +938,85 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
     );
+  }
+
+  Future<void> _openTimerPicker() async {
+    final selected = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: const Color(0xFF111318),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.timer_off_rounded),
+              title: const Text('Off'),
+              onTap: () => Navigator.pop(context, 0),
+            ),
+            ListTile(
+              leading: const Icon(Icons.timer_rounded),
+              title: const Text('5 minutes'),
+              onTap: () => Navigator.pop(context, 300),
+            ),
+            ListTile(
+              leading: const Icon(Icons.timer_rounded),
+              title: const Text('1 hour'),
+              onTap: () => Navigator.pop(context, 3600),
+            ),
+            ListTile(
+              leading: const Icon(Icons.timer_rounded),
+              title: const Text('24 hours'),
+              onTap: () => Navigator.pop(context, 86400),
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_rounded),
+              title: const Text('Custom'),
+              onTap: () => Navigator.pop(context, -1),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (selected == null) return;
+    int ttl = selected;
+    if (selected == -1) {
+      if (!mounted) return;
+      final c = TextEditingController(text: (_ttlSeconds ~/ 60).toString());
+      final v = await showDialog<int>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Custom timer (minutes)'),
+          content: TextField(
+            controller: c,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(hintText: 'e.g. 5'),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: () {
+                final mins = int.tryParse(c.text.trim());
+                if (mins == null || mins <= 0) return;
+                Navigator.pop(ctx, mins * 60);
+              },
+              child: const Text('Set'),
+            ),
+          ],
+        ),
+      );
+      if (v == null) return;
+      ttl = v;
+    }
+    ttl = ttl.clamp(0, AppConfig.maxTtlSeconds);
+    await _db.setChatTtlSeconds(widget.contact.userId, ttl);
+    if (!mounted) return;
+    setState(() {
+      _ephemeralEnabled = ttl > 0;
+      if (ttl > 0) _ttlSeconds = ttl;
+    });
   }
 
   String _formatTime(int timestampMs) {

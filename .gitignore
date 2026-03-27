@@ -18,6 +18,8 @@ client/**/*.log
 # Secrets (CRITICAL)
 client/.env
 server/.env
+client/android/app/google-services.json
+**/google-services.json
 client/tool
 *.key
 *.pem

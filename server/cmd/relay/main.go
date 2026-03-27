@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghostmsg/relay/internal/push"
 	"github.com/ghostmsg/relay/internal/redisstore"
 	"github.com/ghostmsg/relay/internal/ws"
 	"github.com/gorilla/websocket"
@@ -50,6 +52,7 @@ func main() {
 
 	port := getEnv("PORT", "8080")
 	redisURL := getEnv("REDIS_URL", "redis://localhost:6379")
+	fcmServerKey := strings.TrimSpace(os.Getenv("FCM_SERVER_KEY"))
 
 	// ── Redis ─────────────────────────────────────────────────────────────────
 	store, err := redisstore.NewStore(redisURL)
@@ -60,7 +63,8 @@ func main() {
 	log.Info().Msg("redis connected")
 
 	// ── WebSocket Hub ─────────────────────────────────────────────────────────
-	hub := ws.NewHub(store)
+	fcmPush := push.NewFCM(fcmServerKey)
+	hub := ws.NewHub(store, fcmPush)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go hub.Run(ctx)
@@ -100,6 +104,34 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok","service":"ghost-relay"}`))
+	})
+
+	mux.HandleFunc("/register_device", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			UserID   string `json:"user_id"`
+			FCMToken string `json:"fcm_token"`
+			Platform string `json:"platform"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		req.UserID = strings.TrimSpace(req.UserID)
+		req.FCMToken = strings.TrimSpace(req.FCMToken)
+		if req.UserID == "" || req.FCMToken == "" {
+			http.Error(w, "missing user_id or fcm_token", http.StatusBadRequest)
+			return
+		}
+		if err := store.RegisterDeviceToken(r.Context(), req.UserID, req.FCMToken, 30*24*time.Hour); err != nil {
+			http.Error(w, "redis error", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
 
 	// ── Server ────────────────────────────────────────────────────────────────

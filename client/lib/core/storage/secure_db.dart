@@ -14,7 +14,7 @@ import 'package:path/path.dart' as path;
 
 const _kDbKeyStorageKey = 'ghost_db_encryption_key';
 const _kDbFileName      = 'ghost.db';
-const _kDbVersion       = 5;
+const _kDbVersion       = 6;
 
 class SecureDb {
   static final SecureDb _instance = SecureDb._();
@@ -83,7 +83,9 @@ class SecureDb {
         nickname        TEXT,             -- local only, never synced
         fingerprint     TEXT NOT NULL,
         verified        INTEGER NOT NULL DEFAULT 0,
-        added_at        INTEGER NOT NULL  -- unix timestamp ms
+        added_at        INTEGER NOT NULL, -- unix timestamp ms
+        last_message_at INTEGER,
+        chat_ttl_seconds INTEGER NOT NULL DEFAULT 3600
       )
     ''');
 
@@ -183,6 +185,15 @@ class SecureDb {
         await db.execute('ALTER TABLE messages ADD COLUMN body_plaintext TEXT');
       }
     }
+    if (oldVersion < 6) {
+      if (!await _tableHasColumn(db, 'contacts', 'last_message_at')) {
+        await db.execute('ALTER TABLE contacts ADD COLUMN last_message_at INTEGER');
+      }
+      if (!await _tableHasColumn(db, 'contacts', 'chat_ttl_seconds')) {
+        await db.execute(
+            'ALTER TABLE contacts ADD COLUMN chat_ttl_seconds INTEGER NOT NULL DEFAULT 3600');
+      }
+    }
   }
 
   // ── DB key management ─────────────────────────────────────────────────────
@@ -191,7 +202,9 @@ class SecureDb {
     if (key == null) {
       final random    = Random.secure();
       final keyBytes  = Uint8List(32);
-      for (var i = 0; i < 32; i++) keyBytes[i] = random.nextInt(256);
+      for (var i = 0; i < 32; i++) {
+        keyBytes[i] = random.nextInt(256);
+      }
       key = base64Encode(keyBytes);
       await _secureStorage.write(key: _kDbKeyStorageKey, value: key);
     }
@@ -202,6 +215,11 @@ class SecureDb {
   Future<void> insertMessage(Map<String, dynamic> msg) async {
     final d = await db;
     await d.insert('messages', msg, conflictAlgorithm: ConflictAlgorithm.replace);
+    final cid = msg['conversation_id'];
+    final createdAt = msg['created_at'];
+    if (cid is String && cid.isNotEmpty && createdAt is int) {
+      await touchConversationLastMessageAt(cid, createdAt);
+    }
   }
 
   Future<List<Map<String, dynamic>>> getMessages(String conversationId) async {
@@ -377,7 +395,10 @@ class SecureDb {
 
   Future<List<Map<String, dynamic>>> getAllContacts() async {
     final d = await db;
-    return d.query('contacts', orderBy: 'added_at DESC');
+    return d.query(
+      'contacts',
+      orderBy: 'COALESCE(last_message_at, added_at) DESC, added_at DESC',
+    );
   }
 
   Future<Map<String, dynamic>?> getContact(String userId) async {
@@ -397,6 +418,26 @@ class SecureDb {
     await d.update(
       'contacts',
       {'nickname': (trimmed == null || trimmed.isEmpty) ? null : trimmed},
+      where: 'user_id = ?',
+      whereArgs: [userId],
+    );
+  }
+
+  Future<void> touchConversationLastMessageAt(String userId, int timestampMs) async {
+    final d = await db;
+    await d.update(
+      'contacts',
+      {'last_message_at': timestampMs},
+      where: 'user_id = ?',
+      whereArgs: [userId],
+    );
+  }
+
+  Future<void> setChatTtlSeconds(String userId, int ttlSeconds) async {
+    final d = await db;
+    await d.update(
+      'contacts',
+      {'chat_ttl_seconds': ttlSeconds},
       where: 'user_id = ?',
       whereArgs: [userId],
     );

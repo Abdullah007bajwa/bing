@@ -7,6 +7,8 @@ class GhostContact {
   final String? nickname;        // local only, never synced
   final bool verified;
   final int addedAt;             // unix ms
+  final int? lastMessageAt;      // unix ms; null = never chatted
+  final int chatTtlSeconds;      // per-chat default disappearing timer
 
   const GhostContact({
     required this.userId,
@@ -15,6 +17,8 @@ class GhostContact {
     this.nickname,
     this.verified = false,
     required this.addedAt,
+    this.lastMessageAt,
+    this.chatTtlSeconds = 3600,
   });
 
   Map<String, dynamic> toDbMap() => {
@@ -24,6 +28,8 @@ class GhostContact {
     'fingerprint':    fingerprint,
     'verified':       verified ? 1 : 0,
     'added_at':       addedAt,
+    'last_message_at': lastMessageAt,
+    'chat_ttl_seconds': chatTtlSeconds,
   };
 
   factory GhostContact.fromDbMap(Map<String, dynamic> m) => GhostContact(
@@ -33,17 +39,26 @@ class GhostContact {
     fingerprint:  m['fingerprint']    as String,
     verified:    (m['verified']       as int) == 1,
     addedAt:      m['added_at']       as int,
+    lastMessageAt: m['last_message_at'] as int?,
+    chatTtlSeconds: (m['chat_ttl_seconds'] as int?) ?? 3600,
   );
 
   String get displayName => nickname ?? userId.substring(0, 12);
   String get shortId     => '${userId.substring(0, 8)}...${userId.substring(userId.length - 6)}';
 
-  GhostContact copyWith({String? nickname, bool? verified}) => GhostContact(
+  GhostContact copyWith({
+    String? nickname,
+    bool? verified,
+    int? lastMessageAt,
+    int? chatTtlSeconds,
+  }) => GhostContact(
     userId:       userId,
     publicKeyB64: publicKeyB64,
     fingerprint:  fingerprint,
     nickname:     nickname    ?? this.nickname,
     verified:     verified    ?? this.verified,
     addedAt:      addedAt,
+    lastMessageAt: lastMessageAt ?? this.lastMessageAt,
+    chatTtlSeconds: chatTtlSeconds ?? this.chatTtlSeconds,
   );
 }
