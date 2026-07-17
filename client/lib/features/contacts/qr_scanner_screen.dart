@@ -1,5 +1,5 @@
 // lib/features/contacts/qr_scanner_screen.dart
-// Scan a contact's QR code to extract their Ghost ID + public key.
+// Scan a contact's QR code to extract their Vexa ID + public key.
 // Uses MLKit (Android) / AVFoundation (iOS) via mobile_scanner.
 
 import 'package:flutter/material.dart';
@@ -119,7 +119,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
             bottom: 40, left: 0, right: 0,
             child: Center(
               child: Text(
-                'Point at a Ghost QR code',
+                'Point at a Vexa invite QR',
                 style: GoogleFonts.inter(
                   color: Colors.white70, fontSize: 14,
                   shadows: [const Shadow(blurRadius: 8, color: Colors.black)],

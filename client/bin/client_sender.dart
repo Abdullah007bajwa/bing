@@ -44,6 +44,19 @@ Future<E2EIdentity> loadOrCreateIdentity() async {
 Future<void> main(List<String> args) async {
   const name = 'client_sender';
   try {
+    if (args.isNotEmpty && args[0].contains('"')) {
+      logLine(
+        name,
+        'FAIL: recipient id and message must be separate arguments (add a space before the message).',
+      );
+      logLine(
+        name,
+        'Example: dart run bin/client_sender.dart G52i4CGm…urMd "hello"',
+      );
+      exitCode = 64;
+      return;
+    }
+
     final recipientUid = (args.isNotEmpty ? args[0] : '')
         .trim()
         .isNotEmpty

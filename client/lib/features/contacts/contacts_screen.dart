@@ -12,11 +12,12 @@ import '../../relay/relay_coordinator.dart';
 import '../../models/contact.dart';
 import '../../app_config.dart';
 import '../chat/chat_screen.dart';
-import '../settings/panic_wipe_screen.dart';
 import 'qr_scanner_screen.dart';
 import 'add_by_id_screen.dart';
-import '../settings/settings_screen.dart';
 import '../settings/ghost_id_screen.dart';
+import '../settings/settings_screen.dart';
+import '../../widgets/vexa_brand_mark.dart';
+import '../../core/theme/vexa_colors.dart';
 
 class ContactsScreen extends StatefulWidget {
   const ContactsScreen({super.key});
@@ -29,7 +30,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
   final _db = SecureDb();
   List<GhostContact> _contacts = [];
   bool _loading = true;
-  Map<String, int> _unread = {};
   StreamSubscription<String>? _incomingSub;
 
   @override
@@ -63,11 +63,9 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
   Future<void> _loadContacts() async {
     final rows = await _db.getAllContacts();
-    final unread = await _db.getUnreadCountsByConversation();
     if (mounted) {
       setState(() {
         _contacts = rows.map(GhostContact.fromDbMap).toList();
-        _unread = unread;
         _loading  = false;
       });
     }
@@ -82,41 +80,81 @@ class _ContactsScreenState extends State<ContactsScreen> {
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.shield_rounded, color: cs.primary, size: 20),
-            const SizedBox(width: 8),
-            const Text('Vexa'),
+            const VexaAppBarTitle(iconSize: 28),
+            const SizedBox(width: 10),
+            Text(
+              'Chats',
+              style: GoogleFonts.inter(
+                fontSize: 20,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.2,
+                color: cs.primary,
+              ),
+            ),
           ],
         ),
+        centerTitle: true,
+        automaticallyImplyLeading: false,
+        elevation: 0,
         actions: [
           IconButton(
-            icon: Icon(Icons.settings_rounded, color: cs.onSurface),
+            icon: Icon(Icons.settings_rounded, color: cs.primary, size: 24),
             tooltip: 'Settings',
             onPressed: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const SettingsScreen()),
             ).then((_) => _loadContacts()),
           ),
-          IconButton(
-            icon: Icon(Icons.local_fire_department_rounded, color: cs.error),
-            tooltip: 'Panic Wipe',
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const PanicWipeScreen()),
-            ),
-          ),
         ],
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _contacts.isEmpty
-              ? _buildEmptyState(cs)
-              : _buildContactList(cs),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showAddContactSheet,
-        backgroundColor: cs.primary,
-        foregroundColor: const Color(0xFF0A0B0D),
-        icon:  const Icon(Icons.person_add_rounded),
-        label: Text('Add Contact', style: GoogleFonts.inter(fontWeight: FontWeight.w700)),
+      body: SafeArea(
+        child: Column(
+          children: [
+            const SizedBox(height: 8),
+            _buildAddContactRow(cs),
+            const SizedBox(height: 8),
+            Expanded(
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _contacts.isEmpty
+                      ? _buildEmptyState(cs)
+                      : _buildContactList(cs),
+            ),
+            const SizedBox(height: 12),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAddContactRow(ColorScheme cs) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: InkWell(
+        onTap: _showAddContactSheet,
+        borderRadius: BorderRadius.circular(24),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: cs.primary.withValues(alpha: 0.35)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.add_rounded, color: cs.primary, size: 18),
+              const SizedBox(width: 10),
+              Text(
+                'New Contact',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: VexaColors.textPrimary,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -134,7 +172,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           ),
           const SizedBox(height: 8),
           Text(
-            'Add someone via QR or Ghost ID',
+            'Add someone via QR or Vexa ID',
             style: GoogleFonts.inter(fontSize: 13, color: Colors.white30),
           ),
         ],
@@ -144,55 +182,57 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
   Widget _buildContactList(ColorScheme cs) {
     return ListView.separated(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       itemCount: _contacts.length,
-      separatorBuilder: (_, __) => const SizedBox(height: 8),
+      separatorBuilder: (_, __) => Divider(
+        height: 1,
+        thickness: 1,
+        color: VexaColors.divider,
+        indent: 72,
+        endIndent: 16,
+      ),
       itemBuilder: (ctx, i) {
         final c = _contacts[i];
-        final unread = _unread[c.userId] ?? 0;
+        final timeLabel = _formatTimestamp(c.lastMessageAt);
         return ListTile(
           leading: CircleAvatar(
-            backgroundColor: cs.primary.withOpacity(0.15),
-            child: Text(
-              c.displayName[0].toUpperCase(),
-              style: GoogleFonts.inter(fontWeight: FontWeight.w700, color: cs.primary),
-            ),
+            radius: 22,
+            backgroundColor:
+                VexaColors.textSecondary.withValues(alpha: 0.12),
+            child: const Icon(Icons.person_rounded, color: VexaColors.textSecondary, size: 18),
           ),
           title: Text(
             c.displayName,
-            style: GoogleFonts.inter(fontWeight: FontWeight.w600),
+            style: GoogleFonts.inter(
+              fontWeight: FontWeight.w600,
+              color: VexaColors.textPrimary,
+            ),
           ),
           subtitle: Text(
             c.shortId,
-            style: GoogleFonts.robotoMono(fontSize: 10, color: Colors.white38),
+            style: GoogleFonts.inter(
+              fontSize: 13,
+              color: VexaColors.textSecondary,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
           ),
-          trailing: Row(
+          trailing: Column(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              if (unread > 0)
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: cs.primary,
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Text(
-                    unread > 99 ? '99+' : unread.toString(),
-                    style: GoogleFonts.inter(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w800,
-                      color: const Color(0xFF0A0B0D),
-                    ),
-                  ),
+              Text(
+                timeLabel,
+                textAlign: TextAlign.right,
+                style: GoogleFonts.inter(
+                  color: VexaColors.textSecondary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
                 ),
-              if (unread > 0) const SizedBox(width: 10),
-              c.verified
-                  ? Icon(Icons.verified_rounded, color: cs.primary, size: 18)
-                  : Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 18),
+              ),
             ],
           ),
-          tileColor: const Color(0xFF111318),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          tileColor: VexaColors.background,
           onLongPress: () => _editContactName(ctx, c),
           onTap: () => Navigator.push(
             ctx,
@@ -201,6 +241,17 @@ class _ContactsScreenState extends State<ContactsScreen> {
         ).animate().fadeIn(delay: Duration(milliseconds: i * 50)).slideX(begin: 0.05);
       },
     );
+  }
+
+  String _formatTimestamp(int? unixMs) {
+    if (unixMs == null) return '';
+    final dt = DateTime.fromMillisecondsSinceEpoch(unixMs);
+    final now = DateTime.now();
+    final isSameDay = dt.year == now.year && dt.month == now.month && dt.day == now.day;
+    if (isSameDay) {
+      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    }
+    return '${dt.month.toString().padLeft(2, '0')}/${dt.day.toString().padLeft(2, '0')}';
   }
 
   Future<void> _editContactName(BuildContext context, GhostContact c) async {
@@ -220,11 +271,11 @@ class _ContactsScreenState extends State<ContactsScreen> {
             hintText: 'Nickname (optional)',
             hintStyle: GoogleFonts.inter(color: Colors.white38),
             enabledBorder: OutlineInputBorder(
-              borderSide: BorderSide(color: cs.primary.withOpacity(0.25)),
+              borderSide: BorderSide(color: cs.primary.withValues(alpha: 0.25)),
               borderRadius: BorderRadius.circular(12),
             ),
             focusedBorder: OutlineInputBorder(
-              borderSide: BorderSide(color: cs.primary.withOpacity(0.6)),
+              borderSide: BorderSide(color: cs.primary.withValues(alpha: 0.6)),
               borderRadius: BorderRadius.circular(12),
             ),
           ),
@@ -284,7 +335,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
             const SizedBox(height: 12),
             _BottomSheetOption(
               icon:  Icons.fingerprint_rounded,
-              label: 'Enter Ghost ID',
+              label: 'Enter Vexa ID',
               sub:   'Remote contact',
               onTap: () {
                 Navigator.pop(ctx);
@@ -295,7 +346,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
             const SizedBox(height: 12),
             _BottomSheetOption(
               icon:  Icons.qr_code_rounded,
-              label: 'Share my Ghost ID',
+              label: 'Share my Vexa ID',
               sub:   'QR code or link — anytime',
               onTap: () {
                 Navigator.pop(ctx);
@@ -327,7 +378,7 @@ class _BottomSheetOption extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color:        Colors.white.withOpacity(0.04),
+        color:        Colors.white.withValues(alpha: 0.04),
           borderRadius: BorderRadius.circular(14),
           border: Border.all(color: Colors.white12),
         ),

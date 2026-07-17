@@ -14,6 +14,9 @@ const AndroidNotificationChannel _kGhostNotificationsChannel =
   'Vexa Messages',
   description: 'Encrypted message notifications',
   importance: Importance.high,
+  playSound: true,
+  enableVibration: true,
+  showBadge: true,
 );
 
 final FlutterLocalNotificationsPlugin _kLocalNotifications =
@@ -22,6 +25,7 @@ final FlutterLocalNotificationsPlugin _kLocalNotifications =
 final StreamController<String> _tapSenderController =
     StreamController<String>.broadcast();
 
+@pragma('vm:entry-point')
 Future<void> ghostFirebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
 }
@@ -32,24 +36,86 @@ class PushService {
   PushService._internal();
 
   String? _deviceToken;
+  bool _localNotificationsReady = false;
   String? get deviceToken => _deviceToken;
   Stream<String> get tappedSenderIds => _tapSenderController.stream;
 
+  /// Call even when Firebase is unavailable (e.g. Play Services [SERVICE_NOT_AVAILABLE]).
   Future<void> initialize() async {
     if (kIsWeb) return;
-    await Firebase.initializeApp();
-    FirebaseMessaging.onBackgroundMessage(ghostFirebaseMessagingBackgroundHandler);
+
+    // Always set up local notifications + Android 13+ permission first.
+    // Previously Firebase ran first and threw, so nothing below ran.
     await _initLocalNotifications();
-    await _requestPermissions();
-    await _refreshAndRegisterToken();
-    FirebaseMessaging.instance.onTokenRefresh.listen((token) {
-      _deviceToken = token;
-      unawaited(_registerTokenWithRelay(token));
-    });
-    FirebaseMessaging.onMessage.listen(_onForegroundMessage);
-    FirebaseMessaging.onMessageOpenedApp.listen(_onMessageOpened);
-    final initial = await FirebaseMessaging.instance.getInitialMessage();
-    if (initial != null) _onMessageOpened(initial);
+    await _requestAndroidPostNotificationsPermission();
+
+    try {
+      await Firebase.initializeApp();
+      FirebaseMessaging.onBackgroundMessage(ghostFirebaseMessagingBackgroundHandler);
+      await FirebaseMessaging.instance.requestPermission(
+        alert: true,
+        badge: true,
+        sound: true,
+        announcement: false,
+        criticalAlert: false,
+        provisional: false,
+        carPlay: false,
+      );
+      await _refreshAndRegisterToken();
+      FirebaseMessaging.instance.onTokenRefresh.listen((token) {
+        _deviceToken = token;
+        unawaited(_registerTokenWithRelay(token));
+      });
+      FirebaseMessaging.onMessage.listen(_onForegroundMessage);
+      FirebaseMessaging.onMessageOpenedApp.listen(_onMessageOpened);
+      final initial = await FirebaseMessaging.instance.getInitialMessage();
+      if (initial != null) _onMessageOpened(initial);
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[Push] Firebase/FCM unavailable (offline push disabled): $e');
+      }
+    }
+  }
+
+  /// Message arrived on the WebSocket while user is not in that chat — show system tray + badge.
+  Future<void> showIncomingFromRelay({
+    required String senderUserId,
+    required bool viewingThisChat,
+  }) async {
+    if (kIsWeb || !_localNotificationsReady) return;
+    if (viewingThisChat) return;
+    final s = senderUserId.trim();
+    if (s.isEmpty) return;
+
+    final title = s.length <= 18 ? s : '${s.substring(0, 14)}…';
+    const body = 'New message';
+    final details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _kGhostNotificationsChannel.id,
+        _kGhostNotificationsChannel.name,
+        channelDescription: _kGhostNotificationsChannel.description,
+        importance: Importance.high,
+        priority: Priority.high,
+        playSound: true,
+        enableVibration: true,
+        category: AndroidNotificationCategory.message,
+        visibility: NotificationVisibility.public,
+        ticker: 'Vexa message',
+      ),
+      iOS: const DarwinNotificationDetails(
+        presentAlert: true,
+        presentBadge: true,
+        presentSound: true,
+      ),
+    );
+    final notificationId = s.hashCode & 0x7FFFFFFF;
+    await _kLocalNotifications.show(
+      notificationId,
+      title,
+      body,
+      details,
+      payload: s,
+    );
   }
 
   Future<void> _initLocalNotifications() async {
@@ -69,18 +135,10 @@ class PushService {
         .resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>()
         ?.createNotificationChannel(_kGhostNotificationsChannel);
+    _localNotificationsReady = true;
   }
 
-  Future<void> _requestPermissions() async {
-    await FirebaseMessaging.instance.requestPermission(
-      alert: true,
-      badge: true,
-      sound: true,
-      announcement: false,
-      criticalAlert: false,
-      provisional: false,
-      carPlay: false,
-    );
+  Future<void> _requestAndroidPostNotificationsPermission() async {
     await _kLocalNotifications
         .resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>()
@@ -126,9 +184,15 @@ class PushService {
         channelDescription: _kGhostNotificationsChannel.description,
         importance: Importance.high,
         priority: Priority.high,
-        ticker: 'ticker',
+        category: AndroidNotificationCategory.message,
+        visibility: NotificationVisibility.public,
+        ticker: 'Vexa message',
       ),
-      iOS: const DarwinNotificationDetails(),
+      iOS: const DarwinNotificationDetails(
+        presentAlert: true,
+        presentBadge: true,
+        presentSound: true,
+      ),
     );
     await _kLocalNotifications.show(
       DateTime.now().millisecondsSinceEpoch ~/ 1000,

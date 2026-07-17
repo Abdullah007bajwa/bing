@@ -1,5 +1,5 @@
 // lib/features/settings/ghost_id_screen.dart
-// Permanent Ghost ID sharing: full ID, QR code, copy, share sheet.
+// Permanent Vexa ID sharing: full ID, QR code, copy, share sheet.
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -40,14 +40,14 @@ class _GhostIdScreenState extends State<GhostIdScreen> {
     await Clipboard.setData(ClipboardData(text: _userId));
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Ghost ID copied')),
+        const SnackBar(content: Text('Vexa ID copied')),
       );
     }
   }
 
   Future<void> _share() async {
     if (_userId.isEmpty) return;
-    await Share.share(_inviteLink, subject: 'My Ghost ID');
+    await Share.share(_inviteLink, subject: 'My Vexa ID');
   }
 
   @override
@@ -97,7 +97,7 @@ class _GhostIdScreenState extends State<GhostIdScreen> {
                         ),
                         const SizedBox(height: 16),
                         Text(
-                          'Your Ghost ID',
+                          'Your Vexa ID',
                           style: GoogleFonts.inter(
                             fontSize: 12,
                             color: Colors.white38,

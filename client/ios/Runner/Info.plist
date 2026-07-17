@@ -49,6 +49,8 @@
 		<array>
 			<string>remote-notification</string>
 		</array>
+		<key>NSLocationWhenInUseUsageDescription</key>
+		<string>Used to share your location in emergency mode.</string>
 		<key>UIStatusBarHidden</key>
 		<false/>
 	</dict>

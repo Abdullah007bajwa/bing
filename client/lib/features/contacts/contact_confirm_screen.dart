@@ -119,7 +119,7 @@ class _ContactConfirmScreenState extends State<ContactConfirmScreen> {
             const SizedBox(height: 24),
 
             Text(
-              'Ghost ID',
+              'Vexa ID',
               style: GoogleFonts.inter(
                 fontSize: 12,
                 color: Colors.white38,

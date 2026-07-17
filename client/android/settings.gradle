@@ -18,7 +18,9 @@ pluginManagement {
 
 plugins {
     id "dev.flutter.flutter-plugin-loader" version "1.0.0"
-    id "com.android.application" version "8.2.1" apply false
+    // AGP 8.6+ required by androidx.core 1.16.x (pulled by current Flutter plugins).
+    id "com.android.application" version "8.7.3" apply false
+    // Must match kotlin-stdlib 2.2.x pulled by current Flutter plugins (2.0.x compiler → metadata crash in share_plus).
     id "org.jetbrains.kotlin.android" version "2.2.0" apply false
     id "com.google.gms.google-services" version "4.4.4" apply false
 }

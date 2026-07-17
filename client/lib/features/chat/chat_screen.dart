@@ -24,6 +24,7 @@ import '../../relay/websocket_client.dart';
 import '../../models/contact.dart';
 import '../../models/message.dart';
 import '../../app_config.dart';
+import '../../core/theme/vexa_colors.dart';
 
 class ChatScreen extends StatefulWidget {
   final GhostContact contact;
@@ -54,7 +55,6 @@ class _ChatScreenState extends State<ChatScreen> {
   SessionCipher? _cipher;
 
   List<GhostMessage> _messages = [];
-  bool   _isConnected = false;
   bool   _canSend     = false;
   Timer? _purgeTimer;
   String _myUserId = '';
@@ -77,8 +77,12 @@ class _ChatScreenState extends State<ChatScreen> {
     if (kp == null || !mounted) return;
 
     final regId = await _signalKeys.getRegistrationId();
-    print("[DEBUG] receiver known identity: ${base64Encode(kp.getPublicKey().publicKey.serialize())}");
-    print("[DEBUG] receiver registrationId: $regId");
+    if (kDebugMode) {
+      debugPrint(
+        '[Chat] receiver known identity: ${base64Encode(kp.getPublicKey().publicKey.serialize())}',
+      );
+      debugPrint('[Chat] receiver registrationId: $regId');
+    }
     
     // Initialize Signal store (in-memory; we hydrate private prekeys/signed-prekey from SQLCipher/secure storage)
     _signalStore = InMemorySignalProtocolStore(kp, regId);
@@ -117,7 +121,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final storedTtl = (contactRow?['chat_ttl_seconds'] as int?) ?? AppConfig.defaultTtlSeconds;
     _ephemeralEnabled = storedTtl > 0;
     _ttlSeconds = (storedTtl > 0 ? storedTtl : AppConfig.defaultTtlSeconds)
-        .clamp(300, AppConfig.maxTtlSeconds);
+        .clamp(15, AppConfig.maxTtlSeconds);
 
     if (!mounted) return;
 
@@ -197,13 +201,10 @@ class _ChatScreenState extends State<ChatScreen> {
     final prevOnDisconnected = _relay.onDisconnected;
     _relay.onConnected = () {
       prevOnConnected?.call();
-      if (mounted) setState(() => _isConnected = true);
     };
     _relay.onDisconnected = (reason) {
       prevOnDisconnected?.call(reason);
-      if (mounted) setState(() => _isConnected = false);
     };
-    _isConnected = _relay.isConnected || _coordinator.isConnected;
 
     _coordinator.setCurrentChat(widget.contact.userId, _onIncomingPacket);
 
@@ -524,8 +525,8 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   // ── Send a message ─────────────────────────────────────────────────────────
-  Future<void> _sendMessage() async {
-    final text = _composeController.text.trim();
+  Future<void> _sendMessage({String? plaintextOverride}) async {
+    final text = (plaintextOverride ?? _composeController.text).trim();
     if (text.isEmpty || _cipher == null) return;
 
     // Recipient must be resolved (relay drops packets with empty to)
@@ -550,7 +551,7 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
 
-    _composeController.clear();
+    if (plaintextOverride == null) _composeController.clear();
     HapticFeedback.lightImpact();
 
     Map<String, dynamic> encrypted;
@@ -721,38 +722,47 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    String? lastSentId;
+    for (final m in _messages.reversed) {
+      if (m.senderId == _myUserId) {
+        lastSentId = m.id;
+        break;
+      }
+    }
 
     return Scaffold(
       appBar: AppBar(
+        backgroundColor: VexaColors.background,
+        elevation: 0,
+        automaticallyImplyLeading: false,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
+          onPressed: () => Navigator.pop(context),
+        ),
         title: Row(
           children: [
             CircleAvatar(
               radius: 16,
-              backgroundColor: cs.primary.withOpacity(0.15),
-              child: Text(widget.contact.displayName[0].toUpperCase(),
-                  style: TextStyle(color: cs.primary, fontSize: 13, fontWeight: FontWeight.w700)),
+              backgroundColor: cs.primary.withValues(alpha: 0.15),
+              child: Text(
+                widget.contact.displayName[0].toUpperCase(),
+                style: TextStyle(
+                  color: cs.primary,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
             ),
             const SizedBox(width: 10),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(widget.contact.displayName,
-                    style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w600)),
-                Row(children: [
-                  Container(
-                    width: 6, height: 6,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _isConnected ? const Color(0xFF00E5B0) : Colors.white30,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                    _isConnected ? 'Encrypted' : 'Reconnecting…',
-                    style: GoogleFonts.inter(fontSize: 10, color: Colors.white38),
-                  ),
-                ]),
-              ],
+            Expanded(
+              child: Text(
+                widget.contact.displayName,
+                style: GoogleFonts.inter(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.white,
+                ),
+              ),
             ),
           ],
         ),
@@ -778,7 +788,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 final m = _messages[i];
                 return KeyedSubtree(
                   key: ValueKey<String>(m.id),
-                  child: _buildBubble(m),
+                  child: _buildBubble(m, isLastSent: m.id == lastSentId),
                 );
               },
             ),
@@ -789,89 +799,117 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildBubble(GhostMessage msg) {
-    final isMe      = msg.senderId == _myUserId;
+  String? _tryExtractGifUrl(String plaintext) {
+    final trimmed = plaintext.trim();
+    if (trimmed.isEmpty) return null;
+    if (!(trimmed.startsWith('{') && trimmed.endsWith('}'))) return null;
+    try {
+      final decoded = jsonDecode(trimmed);
+      if (decoded is Map<String, dynamic>) {
+        final kind = decoded['kind'];
+        final url = decoded['url'];
+        if ((kind == 'gif' || kind == 'sticker') &&
+            url is String &&
+            url.trim().isNotEmpty) {
+          return url.trim();
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Widget _buildBubble(GhostMessage msg, {required bool isLastSent}) {
+    final isMe = msg.senderId == _myUserId;
     final cached = _cache.getMessage(msg.id);
     final persisted = msg.bodyPlaintext;
+
     final canTryDecrypt = !isMe &&
         cached == null &&
         (persisted == null || persisted.isEmpty) &&
         msg.decryptPermanentFail == 0;
-    final plaintext = cached ??
+
+    final displayPlaintext = cached ??
         persisted ??
         (isMe
             ? (msg.status == MessageStatus.sending ? 'Sending…' : 'Sent')
             : '[Tap to decrypt]');
-    final cs        = Theme.of(context).colorScheme;
+
+    final gifUrl = _tryExtractGifUrl(displayPlaintext);
+    final showDeliveredReceipt = isMe &&
+        isLastSent &&
+        msg.status != MessageStatus.sending;
+
+    final bubbleBorderRadius = BorderRadius.only(
+      topLeft: const Radius.circular(18),
+      topRight: const Radius.circular(18),
+      bottomLeft: Radius.circular(isMe ? 18 : 4),
+      bottomRight: Radius.circular(isMe ? 4 : 18),
+    );
+
+    final bubbleColor =
+        isMe ? VexaColors.bubbleSent : VexaColors.bubbleReceived;
 
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
       child: GestureDetector(
         onTap: canTryDecrypt ? () => _decryptForDisplay(msg) : null,
-        child: Container(
-          margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 4),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.72),
-          decoration: BoxDecoration(
-            gradient: isMe
-                ? LinearGradient(
-                    colors: [cs.primary, const Color(0xFF6C63FF)],
-                    begin:  Alignment.topLeft,
-                    end:    Alignment.bottomRight,
-                  )
-                : null,
-            color: isMe ? null : const Color(0xFF1C1F27),
-            borderRadius: BorderRadius.only(
-              topLeft:     const Radius.circular(18),
-              topRight:    const Radius.circular(18),
-              bottomLeft:  Radius.circular(isMe ? 18 : 4),
-              bottomRight: Radius.circular(isMe ? 4  : 18),
+        child: Column(
+          crossAxisAlignment:
+              isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          children: [
+            Container(
+              margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 4),
+              padding: gifUrl == null
+                  ? const EdgeInsets.symmetric(horizontal: 14, vertical: 10)
+                  : EdgeInsets.zero,
+              constraints: BoxConstraints(
+                maxWidth: MediaQuery.of(context).size.width * 0.72,
+              ),
+              decoration: BoxDecoration(
+                color: bubbleColor,
+                borderRadius: bubbleBorderRadius,
+              ),
+              child: gifUrl == null
+                  ? Text(
+                      displayPlaintext,
+                      style: GoogleFonts.inter(
+                        fontSize: 15,
+                        color: isMe ? Colors.black : VexaColors.textPrimary,
+                      ),
+                    )
+                  : ClipRRect(
+                      borderRadius: bubbleBorderRadius,
+                      child: Image.network(
+                        gifUrl,
+                        width: 180,
+                        height: 180,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => const SizedBox(
+                          width: 180,
+                          height: 180,
+                          child: Icon(Icons.broken_image_rounded),
+                        ),
+                      ),
+                    ),
             ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            mainAxisSize: MainAxisSize.min,
-            children: [
+            const SizedBox(height: 4),
+            Text(
+              _formatTime(msg.createdAt),
+              style: GoogleFonts.inter(
+                fontSize: 11,
+                color: VexaColors.receipt,
+              ),
+            ),
+            if (showDeliveredReceipt)
               Text(
-                plaintext,
+                'Delivered',
                 style: GoogleFonts.inter(
-                  fontSize: 14,
-                  color:    isMe ? Colors.black : Colors.white,
+                  fontSize: 11,
+                  color: VexaColors.textSecondary,
+                  fontStyle: FontStyle.italic,
                 ),
               ),
-              const SizedBox(height: 4),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (msg.isEphemeral)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 4),
-                      child: Icon(Icons.timer_rounded,
-                          size: 10, color: isMe ? Colors.black54 : Colors.white30),
-                    ),
-                  Text(
-                    _formatTime(msg.createdAt),
-                    style: GoogleFonts.inter(
-                      fontSize: 10,
-                      color: isMe ? Colors.black54 : Colors.white30,
-                    ),
-                  ),
-                  if (isMe) ...[
-                    const SizedBox(width: 4),
-                    Icon(
-                      msg.status == MessageStatus.sending
-                          ? Icons.access_time_rounded
-                          : (msg.status == MessageStatus.read || msg.status == MessageStatus.delivered)
-                              ? Icons.done_all_rounded
-                              : Icons.check_rounded,
-                      size:  12,
-                      color: Colors.black54,
-                    ),
-                  ],
-                ],
-              ),
-            ],
-          ),
+          ],
         ),
       ),
     );
@@ -900,42 +938,46 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildComposeBar(ColorScheme cs) {
-    return Container(
-      padding:    const EdgeInsets.fromLTRB(12, 8, 12, 20),
-      decoration: BoxDecoration(
-        color: const Color(0xFF0F1115),
-        border: Border(top: BorderSide(color: Colors.white10)),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              controller:  _composeController,
-              maxLines:    null,
-              keyboardType: TextInputType.multiline,
-              style:      GoogleFonts.inter(fontSize: 15),
-              decoration: const InputDecoration(
-                hintText: 'Message…',
-                contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              ),
-              onSubmitted: _canSend ? (_) => _sendMessage() : null,
-            ),
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: BoxDecoration(
+            color: VexaColors.surface,
+            borderRadius: BorderRadius.circular(28),
           ),
-          const SizedBox(width: 8),
-          GestureDetector(
-            onTap: _canSend ? _sendMessage : null,
-            child: Container(
-              width: 44, height: 44,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [cs.primary, const Color(0xFF6C63FF)],
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _composeController,
+                  maxLines: null,
+                  keyboardType: TextInputType.multiline,
+                  style: GoogleFonts.inter(
+                    fontSize: 15,
+                    color: VexaColors.textPrimary,
+                  ),
+                  decoration: InputDecoration(
+                    hintText: 'Message...',
+                    hintStyle: TextStyle(color: VexaColors.textHint),
+                    border: InputBorder.none,
+                    isDense: true,
+                  ),
+                  onSubmitted:
+                      _canSend ? (_) => _sendMessage() : null,
                 ),
-                borderRadius: BorderRadius.circular(22),
               ),
-              child: const Icon(Icons.send_rounded, color: Colors.black, size: 20),
-            ),
+              const SizedBox(width: 6),
+              IconButton(
+                icon: Icon(Icons.send_rounded, color: cs.primary, size: 22),
+                tooltip: 'Send',
+                onPressed: _canSend ? () => _sendMessage() : null,
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }

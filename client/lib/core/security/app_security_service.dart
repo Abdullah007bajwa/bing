@@ -10,6 +10,7 @@ import 'package:local_auth/local_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const _kBiometricLockEnabledKey = 'ghost_biometric_lock_enabled';
+const _kAllowScreenshotsKey = 'ghost_allow_screenshots';
 
 enum AuthOutcome {
   success,
@@ -31,10 +32,29 @@ class AppSecurityService {
   final LocalAuthentication _localAuth = LocalAuthentication();
 
   /// Apply FLAG_SECURE so screenshots and screen recording are blocked.
-  /// Call at app startup and on resume. No toggle — always enforced.
+  /// Call at app startup and on resume.
   Future<void> enforceScreenshotProtection() async {
     if (!Platform.isAndroid) return;
-    await FlutterWindowManager.addFlags(FlutterWindowManager.FLAG_SECURE);
+    final allow = await isScreenshotsAllowed();
+    if (allow) {
+      await FlutterWindowManager.clearFlags(FlutterWindowManager.FLAG_SECURE);
+    } else {
+      await FlutterWindowManager.addFlags(FlutterWindowManager.FLAG_SECURE);
+    }
+  }
+
+  /// Allow screenshots/screen recording (Android only).
+  /// Default: true in debug builds, false in release builds.
+  Future<bool> isScreenshotsAllowed() async {
+    final prefs = await SharedPreferences.getInstance();
+    final v = prefs.getBool(_kAllowScreenshotsKey);
+    return v ?? kDebugMode;
+  }
+
+  Future<void> setScreenshotsAllowed(bool allowed) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kAllowScreenshotsKey, allowed);
+    await enforceScreenshotProtection();
   }
 
   Future<bool> isBiometricLockEnabled() async {
@@ -63,7 +83,7 @@ class AppSecurityService {
   /// Authenticate using OS: fingerprint, face, or device credential.
   /// Returns true if authenticated, false if failed/cancelled.
   Future<bool> authenticate({
-    String reason = 'Unlock Ghost',
+    String reason = 'Unlock Vexa',
     bool useErrorDialogs = true,
   }) async {
     final r = await authenticateOutcome(reason: reason, useErrorDialogs: useErrorDialogs);
@@ -71,7 +91,7 @@ class AppSecurityService {
   }
 
   Future<AuthOutcome> authenticateOutcome({
-    String reason = 'Unlock Ghost',
+    String reason = 'Unlock Vexa',
     bool useErrorDialogs = true,
   }) async {
     try {

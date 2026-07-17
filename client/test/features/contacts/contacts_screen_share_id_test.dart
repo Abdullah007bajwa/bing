@@ -1,4 +1,4 @@
-// Widget test: Add Contact sheet includes "Share my Ghost ID" so user can share QR/link whenever.
+// Widget test: Add Contact sheet includes "Share my Vexa ID" so user can share QR/link whenever.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -6,7 +6,7 @@ import 'package:ghost_client/features/contacts/contacts_screen.dart';
 
 void main() {
   group('ContactsScreen Add Contact sheet', () {
-    testWidgets('FAB opens add sheet with Share my Ghost ID option', (WidgetTester tester) async {
+    testWidgets('FAB opens add sheet with Share my Vexa ID option', (WidgetTester tester) async {
       await tester.pumpWidget(
         MaterialApp(
           theme: ThemeData.dark(),
@@ -21,10 +21,10 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
 
-      expect(find.text('Share my Ghost ID'), findsOneWidget);
+      expect(find.text('Share my Vexa ID'), findsOneWidget);
     });
 
-    testWidgets('Add Contact sheet has Scan QR and Enter Ghost ID', (WidgetTester tester) async {
+    testWidgets('Add Contact sheet has Scan QR and Enter Vexa ID', (WidgetTester tester) async {
       await tester.pumpWidget(
         MaterialApp(
           theme: ThemeData.dark(),
@@ -39,7 +39,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
 
       expect(find.text('Scan QR Code'), findsOneWidget);
-      expect(find.text('Enter Ghost ID'), findsOneWidget);
+      expect(find.text('Enter Vexa ID'), findsOneWidget);
     });
   });
 }

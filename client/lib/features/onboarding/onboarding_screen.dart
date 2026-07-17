@@ -15,6 +15,7 @@ import '../../core/crypto/prekey_management_service.dart';
 import '../../core/crypto/signal_keys_upload_service.dart';
 import '../../app_config.dart';
 import '../settings/panic_setup_screen.dart';
+import '../../widgets/vexa_brand_mark.dart';
 
 class OnboardingScreen extends StatefulWidget {
   const OnboardingScreen({super.key});
@@ -119,7 +120,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const _GhostLogo(),
+          const VexaBrandMark(logoSize: 80, showWordmark: true, pulseLogo: true),
           const SizedBox(height: 32),
           Text(
             'Generating your identity…',
@@ -142,14 +143,14 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           const SizedBox(height: 32),
-          const _GhostLogo()
+          VexaBrandMark(logoSize: 88, showWordmark: true, pulseLogo: false)
               .animate()
               .fadeIn(duration: 800.ms)
               .slideY(begin: -0.2),
 
           const SizedBox(height: 16),
           Text(
-            'You are now Ghost.',
+            'You are now Vexa.',
             style: GoogleFonts.inter(
               fontSize: 26, fontWeight: FontWeight.w700, color: Colors.white,
             ),
@@ -193,7 +194,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 ),
                 const SizedBox(height: 16),
                 Text(
-                  'Your Ghost ID',
+                  'Your Vexa ID',
                   style: GoogleFonts.inter(
                     fontSize: 12, color: Colors.white38, letterSpacing: 1.2,
                     fontWeight: FontWeight.w600,
@@ -223,7 +224,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
           // Share invite link
           ElevatedButton.icon(
-            onPressed: () => Share.share(_inviteLink, subject: 'Add me on Ghost'),
+            onPressed: () => Share.share(_inviteLink, subject: 'Add me on Vexa'),
             icon:  const Icon(Icons.share_rounded),
             label: const Text('Share Invite Link'),
           ).animate().fadeIn(delay: 500.ms).slideY(begin: 0.2),
@@ -290,45 +291,5 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   String _formatId(String id) {
     if (id.length < 24) return id;
     return '${id.substring(0, 8)} ${id.substring(8, 16)} ${id.substring(16, 24)}...';
-  }
-}
-
-// ── Ghost Logo ─────────────────────────────────────────────────────────────
-class _GhostLogo extends StatelessWidget {
-  const _GhostLogo();
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Container(
-          width: 72, height: 72,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            gradient: const LinearGradient(
-              colors: [Color(0xFF00E5B0), Color(0xFF6C63FF)],
-              begin:  Alignment.topLeft,
-              end:    Alignment.bottomRight,
-            ),
-            boxShadow: [
-              BoxShadow(
-                color:  const Color(0xFF00E5B0).withValues(alpha: 0.4),
-                blurRadius: 24,
-                spreadRadius: 4,
-              ),
-            ],
-          ),
-          child: const Icon(Icons.shield_rounded, size: 36, color: Colors.white),
-        ),
-        const SizedBox(height: 12),
-        Text(
-          'GHOST',
-          style: GoogleFonts.inter(
-            fontSize: 22, fontWeight: FontWeight.w900, letterSpacing: 8,
-            color:    Colors.white,
-          ),
-        ),
-      ],
-    );
   }
 }

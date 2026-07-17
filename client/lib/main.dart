@@ -1,5 +1,5 @@
 // lib/main.dart
-// Ghost — Military-grade private messaging.
+// Vexa — end-to-end encrypted messaging.
 // Entry point: security flags (screenshot block always on), services, onboarding or home.
 
 import 'dart:async';
@@ -23,10 +23,27 @@ import 'features/contacts/contacts_screen.dart';
 import 'features/chat/chat_screen.dart';
 import 'core/auth/auth_gate.dart';
 import 'features/security/biometric_lock_screen.dart';
+import 'core/theme/vexa_colors.dart';
 import 'app_config.dart';
+import 'widgets/vexa_brand_mark.dart';
+import 'features/marketing/marketing_landing_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Premium dark system UI styling (light icons on dark background).
+  try {
+    SystemChrome.setSystemUIOverlayStyle(
+      const SystemUiOverlayStyle(
+        statusBarColor: VexaColors.background,
+        statusBarIconBrightness: Brightness.light,
+        systemNavigationBarColor: VexaColors.background,
+        statusBarBrightness: Brightness.dark,
+      ),
+    );
+  } catch (_) {
+    // Best-effort; do not crash if a platform doesn't support a specific field.
+  }
 
   var isNewUser = true;
 
@@ -224,10 +241,7 @@ class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
     if (!_checkedBiometric) {
       return const MaterialApp(
         debugShowCheckedModeBanner: false,
-        home: Scaffold(
-          backgroundColor: Color(0xFF0A0B0D),
-          body: Center(child: CircularProgressIndicator()),
-        ),
+        home: VexaLaunchShell(subtitle: 'Securing session…'),
       );
     }
     return MaterialApp(
@@ -241,25 +255,26 @@ class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
       routes: {
         '/onboarding': (_) => const OnboardingScreen(),
         '/home':       (_) => const ContactsScreen(),
+        '/marketing': (_) => const MarketingLandingScreen(),
       },
     );
   }
 
   ThemeData _buildTheme() {
-    const bg     = Color(0xFF0A0B0D);
-    const surface = Color(0xFF111318);
-    const accent  = Color(0xFF00E5B0);    // Ghost teal
-    const text    = Color(0xFFF0F2F5);
-    const subtle  = Color(0xFF3A3D47);
+    const bg = VexaColors.background;
+    const surface = VexaColors.surface;
+    const accent = VexaColors.accent;
+    const text = VexaColors.textPrimary;
+    const subtle = VexaColors.divider;
 
     final base = ThemeData.dark();
     return base.copyWith(
       scaffoldBackgroundColor: bg,
       colorScheme: ColorScheme.dark(
         primary:   accent,
-        secondary: const Color(0xFF6C63FF),
+        secondary: accent,
         surface:   surface,
-        error:     const Color(0xFFFF4D6A),
+        error:     VexaColors.danger,
       ),
       textTheme: GoogleFonts.interTextTheme(base.textTheme).apply(
         bodyColor:    text,
@@ -271,18 +286,21 @@ class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
         centerTitle:      true,
         titleTextStyle: GoogleFonts.inter(
           color:      text,
-          fontSize:   17,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.3,
+          fontSize:   18,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.2,
         ),
-        iconTheme: const IconThemeData(color: text),
+        iconTheme: const IconThemeData(color: Colors.white),
       ),
       cardTheme: CardTheme(
         color:        surface,
         elevation:    0,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
-          side: BorderSide(color: subtle.withOpacity(0.5), width: 0.5),
+          side: BorderSide(
+            color: subtle.withValues(alpha: 0.5),
+            width: 0.5,
+          ),
         ),
       ),
       inputDecorationTheme: InputDecorationTheme(
@@ -290,29 +308,40 @@ class _GhostAppState extends State<GhostApp> with WidgetsBindingObserver {
         fillColor:   surface,
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide:   BorderSide(color: subtle),
+          borderSide:   BorderSide(color: VexaColors.inputBorder),
         ),
         enabledBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide:   BorderSide(color: subtle),
+          borderSide:   BorderSide(color: VexaColors.inputBorder),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
           borderSide:   BorderSide(color: accent, width: 1.5),
         ),
-        hintStyle: TextStyle(color: text.withOpacity(0.35)),
+        hintStyle: const TextStyle(color: VexaColors.textHint, fontSize: 15),
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      ),
+      switchTheme: SwitchThemeData(
+        thumbColor: WidgetStateProperty.resolveWith((s) {
+          return s.contains(WidgetState.selected) ? accent : Colors.grey;
+        }),
+        trackColor: WidgetStateProperty.resolveWith((s) {
+          return s.contains(WidgetState.selected)
+              ? accent.withValues(alpha: 0.4)
+              : Colors.grey.withValues(alpha: 0.3);
+        }),
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
           backgroundColor:  accent,
-          foregroundColor:  bg,
+          foregroundColor:  Colors.black,
           minimumSize:      const Size(double.infinity, 52),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
           textStyle: GoogleFonts.inter(fontWeight: FontWeight.w700, fontSize: 16),
           elevation: 0,
         ),
       ),
+      dividerColor: VexaColors.divider,
     );
   }
 }

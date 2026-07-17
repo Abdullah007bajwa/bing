@@ -6,6 +6,7 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter/foundation.dart';
 import 'dart:async';
+import '../core/push/push_service.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
 import 'package:uuid/uuid.dart';
@@ -183,6 +184,17 @@ class RelayCoordinator {
         FlutterRingtonePlayer().playNotification();
         HapticFeedback.selectionClick();
       } catch (_) {}
+
+      // System notification + launcher badge when user is not inside this chat
+      // (server does not send FCM while recipient is online — only WebSocket).
+      final viewingThisChat =
+          _currentChatUserId != null && _currentChatUserId == fromNorm;
+      unawaited(
+        PushService().showIncomingFromRelay(
+          senderUserId: fromNorm,
+          viewingThisChat: viewingThisChat,
+        ),
+      );
     }
 
     _buffer.putIfAbsent(fromNorm, () => []).add(packet);

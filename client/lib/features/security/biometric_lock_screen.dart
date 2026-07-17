@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../core/security/app_security_service.dart';
+import '../../widgets/vexa_brand_mark.dart';
 
 class BiometricLockScreen extends StatefulWidget {
   final VoidCallback onUnlocked;
@@ -27,7 +28,7 @@ class _BiometricLockScreenState extends State<BiometricLockScreen> {
       _error = null;
     });
     final outcome = await _security.authenticateOutcome(
-      reason: 'Unlock Ghost to continue',
+      reason: 'Unlock Vexa to continue',
       useErrorDialogs: false,
     );
     if (!mounted) return;
@@ -84,14 +85,16 @@ class _BiometricLockScreenState extends State<BiometricLockScreen> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
+                const VexaBrandMark(logoSize: 76, showWordmark: true, pulseLogo: true),
+                const SizedBox(height: 28),
                 Icon(
                   Icons.lock_rounded,
-                  size: 72,
-                  color: cs.primary.withOpacity(0.8),
+                  size: 40,
+                  color: cs.primary.withOpacity(0.85),
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 16),
                 Text(
-                  'Ghost is locked',
+                  'Vexa is locked',
                   style: GoogleFonts.inter(
                     fontSize: 22,
                     fontWeight: FontWeight.w700,

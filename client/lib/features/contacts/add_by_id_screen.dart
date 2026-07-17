@@ -1,5 +1,5 @@
 // lib/features/contacts/add_by_id_screen.dart
-// Add a remote contact by pasting their Ghost ID.
+// Add a remote contact by pasting their Vexa ID.
 // Uses RPC get_public_key_by_hash (RLS-safe), then shows confirmation + fingerprint + nickname.
 
 import 'package:flutter/material.dart';
@@ -71,14 +71,14 @@ class _AddByIdScreenState extends State<AddByIdScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Add by Ghost ID')),
+      appBar: AppBar(title: const Text('Add by Vexa ID')),
       body: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Enter Ghost ID',
+              'Enter Vexa ID',
               style: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 16),
             ),
             const SizedBox(height: 8),
@@ -86,7 +86,7 @@ class _AddByIdScreenState extends State<AddByIdScreen> {
               controller:   _idController,
               autocorrect:  false,
               style: GoogleFonts.robotoMono(fontSize: 13),
-              decoration: const InputDecoration(hintText: 'Paste Ghost ID here…'),
+              decoration: const InputDecoration(hintText: 'Paste Vexa ID here…'),
             ),
             if (_error != null) ...[
               const SizedBox(height: 10),

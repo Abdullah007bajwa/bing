@@ -18,6 +18,7 @@ class PrekeyManagementService {
   final _keysUploadService = SignalKeysUploadService();
   final _db = SecureDb();
   Timer? _rotationTimer;
+  bool _refillInFlight = false;
 
   static const int _targetPrekeyCount = 50;
   static const int _refillThreshold = 10;
@@ -59,8 +60,12 @@ class PrekeyManagementService {
     // Cancel existing timer
     _rotationTimer?.cancel();
 
-    // Initial check immediately
-    _checkAndRefillPrekeys(userId: userId);
+    // Defer first check so new-user onboarding can finish local + Supabase prekey upload
+    // (otherwise we can read a partial local max and duplicate key_ids on the server).
+    unawaited(Future<void>(() async {
+      await Future<void>.delayed(const Duration(seconds: 3));
+      await _checkAndRefillPrekeys(userId: userId);
+    }));
 
     // Then check every 24 hours
     _rotationTimer = Timer.periodic(
@@ -85,6 +90,8 @@ class PrekeyManagementService {
 
   /// Check if refill needed, generate and upload new keys
   Future<void> _checkAndRefillPrekeys({required String userId}) async {
+    if (_refillInFlight) return;
+    _refillInFlight = true;
     try {
       // First, ensure user exists in Supabase before checking prekey count
       // This prevents FK constraint errors when user table row doesn't exist yet
@@ -111,19 +118,38 @@ class PrekeyManagementService {
 
       // Refill if needed
       if (count < _refillThreshold) {
-        final toGenerate = _targetPrekeyCount - count;
-        if (kDebugMode) {
-          debugPrint('[PrekeyManagement] Generating $toGenerate new prekeys...');
-        }
-
         var localMax = 0;
         final localRows = await _db.loadAllSignalPreKeyRecords();
         for (final r in localRows) {
           final id = r['key_id'];
           if (id is int && id > localMax) localMax = id;
         }
-        final serverMax =
+
+        var serverMax =
             await _keysUploadService.fetchMaxPrekeyKeyId(userId: userId);
+        // Replication / timing: local may already hold a full set while Supabase is still empty.
+        for (var attempt = 0;
+            attempt < 3 && serverMax == 0 && localMax >= _targetPrekeyCount;
+            attempt++) {
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+          serverMax =
+              await _keysUploadService.fetchMaxPrekeyKeyId(userId: userId);
+        }
+        if (serverMax == 0 && localMax >= _targetPrekeyCount) {
+          if (kDebugMode) {
+            debugPrint(
+              '[PrekeyManagement] Skipping refill: local has $localMax prekeys; '
+              'server not listing them yet (onboarding upload likely in flight)',
+            );
+          }
+          return;
+        }
+
+        final toGenerate = _targetPrekeyCount - count;
+        if (kDebugMode) {
+          debugPrint('[PrekeyManagement] Generating $toGenerate new prekeys...');
+        }
+
         final startId =
             (localMax > serverMax ? localMax : serverMax) + 1;
 
@@ -153,6 +179,8 @@ class PrekeyManagementService {
       if (kDebugMode) {
         debugPrint('[PrekeyManagement] Error during refill: $e');
       }
+    } finally {
+      _refillInFlight = false;
     }
   }
 

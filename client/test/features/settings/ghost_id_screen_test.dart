@@ -18,7 +18,7 @@ void main() {
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
     });
 
-    testWidgets('has app bar title Ghost ID', (WidgetTester tester) async {
+    testWidgets('has app bar title Vexa ID', (WidgetTester tester) async {
       await tester.pumpWidget(
         MaterialApp(
           theme: ThemeData.dark(),
@@ -27,7 +27,7 @@ void main() {
       );
       await tester.pump();
 
-      expect(find.text('Ghost ID'), findsWidgets);
+      expect(find.text('Vexa ID'), findsWidgets);
     });
   });
 }

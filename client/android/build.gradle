@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
 allprojects {
     repositories {
         google()
@@ -27,6 +29,7 @@ rootProject.buildDir = "../build"
 subprojects {
     project.buildDir = "${rootProject.buildDir}/${project.name}"
 }
+
 // ── FIX FOR ANDROID GRADLE PLUGIN 8.0+ MISSING NAMESPACE IN CUSTOM PLUGINS ──
 subprojects {
     afterEvaluate { project ->
@@ -43,9 +46,20 @@ subprojects {
                     } catch (Exception e) {}
                     namespace = defaultNamespace
                 }
-                
+
                 // FIX FOR AAPT lStar/Activity Error: Force plugins to use new API 35
                 compileSdkVersion 35
+
+                // Match app module: removes Java 8 obsolete warnings from plugin JavaCompile tasks.
+                compileOptions {
+                    sourceCompatibility JavaVersion.VERSION_17
+                    targetCompatibility JavaVersion.VERSION_17
+                }
+            }
+        }
+        project.tasks.withType(KotlinCompile).configureEach {
+            kotlinOptions {
+                jvmTarget = JavaVersion.VERSION_17.toString()
             }
         }
     }

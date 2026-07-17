@@ -38,6 +38,11 @@
 - [ ] Target audience and ads declarations completed.
 
 ## 6) Build and upload
+
+### Windows: JDK 17 and Gradle (avoid `gradlew` / lock errors)
+- [ ] **JDK 17+ for `.\gradlew`:** Flutter builds may use a newer JDK, but `client\android\gradlew` uses your shell `JAVA_HOME` / `PATH`. If the log shows `jre1.8.0_*`, install JDK 17+ (or use Android Studio’s **jbr**), then either set `JAVA_HOME` for the terminal session or uncomment `org.gradle.java.home` in `android/gradle.properties`.
+- [ ] **One Gradle at a time:** If you see `Timeout … exclusive access … gradle-8.9-all.zip` or `Timeout waiting to lock build logic queue`, stop other builds (`flutter run` / Android Studio sync), run `cd android` then `.\gradlew --stop`, wait a few seconds, and run a single `.\gradlew` or `flutter build` again.
+
 - [ ] Build release AAB: `flutter build appbundle --release`.
 - [ ] Upload AAB to Internal testing track.
 - [ ] Verify install/update on multiple devices.

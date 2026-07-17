@@ -42,7 +42,7 @@ void main() {
       expect(find.byType(TextField), findsOneWidget);
     });
 
-    testWidgets('shows Ghost ID and Confirm contact text', (WidgetTester tester) async {
+    testWidgets('shows Vexa ID and Confirm contact text', (WidgetTester tester) async {
       await tester.pumpWidget(
         MaterialApp(
           theme: ThemeData.dark(),
@@ -55,7 +55,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Ghost ID'), findsOneWidget);
+      expect(find.text('Vexa ID'), findsOneWidget);
       expect(find.text('Confirm contact'), findsOneWidget);
     });
 
